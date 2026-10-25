@@ -1,0 +1,35 @@
+name: Windows build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build application
+        run: dotnet build src/LightOrder.App/LightOrder.App.csproj -c Release
+      - name: Service tests (no hardware)
+        run: dotnet run --project tests/LightOrder.Service.Tests/LightOrder.Service.Tests.csproj -c Release
+      - name: Interface tests
+        run: node src/LightOrder.App/verify-ui.cjs
+      - name: Plugin tests (no hardware)
+        shell: pwsh
+        run: |
+          dotnet run --project plugins/GigabyteIt5702/GigabyteIt5702.csproj -- --self-test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project plugins/OpenRgb/ControlCenter.OpenRgb.csproj -- --self-test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project plugins/HardwareMonitor/HardwareMonitor.csproj -- --service-self-test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project plugins/WindowsPolicy/ControlCenter.WindowsPolicy.csproj -- --self-test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build setup
+        run: dotnet build src/LightOrder.Setup/LightOrder.Setup.csproj -c Release
