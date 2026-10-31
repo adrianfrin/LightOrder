@@ -4,74 +4,83 @@
 
 ## Install and launch
 
-1. Use Windows 11 x64 and install the Microsoft Edge WebView2 Evergreen Runtime from [Microsoft](https://developer.microsoft.com/microsoft-edge/webview2/). Setup checks for it; it does not silently download it.
-2. Download `LightOrder.exe` from the project's [release page](https://github.com/adrianfrin/LightOrder/releases). Read that release's dependency list, verification notes, and SHA-256 hash.
-3. Run the installer from your ordinary Windows account. Approve the initial administrator prompt. Setup installs `LightOrder.Service`, protected plugins, and the desktop app, then launches the app without elevation.
-4. Check the service connection in Settings. Startup discovers devices and reads state; it does not automatically apply saved lighting or fan profiles. The OpenRGB adapter may start its configured backend during discovery, but discovery does not set a lighting effect.
-5. Select a device and review its supported controls before applying a change.
+1. Use Windows 11 x64 and install [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Setup checks for it; it does not silently download it.
+2. Download `LightOrder-win-x64.exe` from [Releases](https://github.com/adrianfrin/LightOrder/releases). Read that release's dependencies, verification notes, and SHA-256 hash.
+3. Run setup from your ordinary Windows account and approve administrator access. A protected worker installs `LightOrder.Service`, plugins, and the app. It then tries to launch the app with that account's existing unelevated Explorer token. If this is unavailable, setup reports completion and asks you to reopen LightOrder.
+   Setup creates desktop and Start menu shortcuts pointing directly to the ordinary-user app, and registers an entry in Windows Installed apps.
+4. Check the service connection in Settings. Discovery reads devices. **Restore lighting on startup** and **Restore cooling on startup** are separate opt-ins, both false by default. Enabled restoration requests saved settings only for eligible discovered devices, without retrying failures. Pending incomplete lighting operations suppress startup lighting restoration.
+5. Review each device's available controls before applying a change. OpenRGB discovery may start the configured backend, but does not itself set an effect.
 
-Self-contained packages include .NET. WebView2 remains a separate prerequisite. A successful build does not establish that installation, update, or removal has been verified on a clean machine.
+Self-contained packages include .NET. WebView2 remains a prerequisite. A successful build does not establish clean-machine installation, update, or removal.
 
 ## Lighting
 
-Choose a device, select Static or Off, adjust color/brightness, then use **Save & apply**. Editing a draft does not write to hardware. Brightness scales RGB output; it is not measured light output.
+Select a device and Static, Breathing, Rainbow, or Off, adjust color/brightness, then **Save & apply**. Draft edits do not write hardware. Brightness scales RGB output; it is not measured light output. Breathing/rainbow use service-generated static frames at a target 4 fps, on at most 16 devices, with periods of 2–60 seconds (default 6). Device latency can lower the rate. A failed frame stops that device's animation without retry.
 
-Sync is opt-in and requires at least two eligible devices with known independent settings. Save an independent setting first if a device's prior state is unknown. Choose sync members, edit the group, and save. Disabling sync restores the known pre-sync settings when you save and apply. This restores settings known to LightOrder, not an unreadable factory or pre-installation color.
+Sync is opt-in and needs at least two eligible devices with known independent settings. Save an independent setting first when its prior state is unknown. Select members, edit the group, and save. Disable sync and save/apply to restore known pre-sync settings. These are LightOrder's known settings, not unreadable factory colors. Synchronized animations can share a phase; this is not a hardware timing guarantee.
 
-A partial device failure stays visible. Check each device before trying again. An accepted command or matching OpenRGB cache is not physical verification. There is no automatic retry after an uncertain write.
+Use the save menu to create a scene for reuse or automation. A partial failure remains visible; inspect each device before trying again. Accepted commands and matching OpenRGB cache values do not establish physical output. Uncertain writes are not automatically replayed.
 
 ## Cooling
 
-Only a controller that advertises `fan.profile` has editable controls. Select radiator or case, edit a curve or manual percentage, then save and apply. Curves require 2–12 points, increasing temperatures, nondecreasing duty, and a final point of 80°C / 100%. Minimum duty is 40% radiator and 25% case. Manual mode retains a thermal floor. Pump speed is read-only.
+Only devices advertising `fan.profile` offer editing. Select radiator or case, choose a curve or manual percentage, then save/apply. Curves need 2–12 points, increasing temperature, nondecreasing duty, and an 80°C / 100% endpoint. Minimum duty is 40% radiator and 25% case. Silent fixes duty at 40% radiator / 25% case below the 80°C emergency threshold. Balanced follows filtered temperature with hysteresis and bounded duty changes. All modes retain immediate raw-temperature protection at 80°C. Pump RPM is read-only; duty is not a fixed RPM.
 
-Each session lasts at most **30 minutes or 1,800 updates**. Changing a profile keeps the original expiry. The controller attempts restoration at expiry or on **Restore original control**. Check the reported restoration result. Percentage is duty, not a fixed RPM.
+Control is **continuous**, without a fixed duration or update limit, and continues with the UI closed. **Restore original control**, service shutdown, and safety faults attempt restoration. Check the reported result.
 
-Missing temperature/RPM feedback or a fan fault triggers a restoration attempt. Do not use this bounded implementation as an indefinite unattended cooling controller. Sleep/resume and crash recovery remain unverified; hard crashes cannot guarantee restoration.
+Missing, stale, ambiguous, or invalid temperature/RPM feedback and fan faults trigger restoration. Suspend notifications and control gaps over five seconds restore before restarting from fresh actual telemetry. An unresolved durable restoration intent blocks new takeover. Hard crashes cannot guarantee restoration; long-duration and sleep/resume hardware verification of the new code remains pending. See [cooling and recovery](cooling.md).
 
-## System policies
+## Automation
 
-My computer shows available hardware information and Windows policies. Choose a power scheme or a process and supported priority; affinity is offered only when supported. A process is identified by PID and creation time. RealTime priority and unsupported multi-group affinity changes are rejected.
+In **Automation**, create a schedule or exact-process rule and explicitly enable it. New rules default to disabled. Rules combine saved lighting scenes, supported cooling presets, power schemes, and process policies. Schedules run only in the exact local minute; process rules apply to newly observed identities belonging to the installation owner. Exit actions use settings captured when saving. Read [automation](automation.md) for at-most-once dispatch, missed triggers, multiple instances, pause states, and recovery.
 
-**Restore original policies** restores only properties still matching LightOrder's writes, preserving later changes made by other software. A restarted process with a reused PID is not treated as the original process.
+## System policies and preferences
+
+My computer shows available hardware information and Windows policies. Choose a power scheme, or a process and supported priority; affinity is offered only where supported. PID plus creation time identifies a process. RealTime priority and unsupported multi-group affinity writes are rejected.
+
+**Restore original policies** restores only properties still matching LightOrder's writes, preserving later external changes. Reused PIDs do not inherit an old process identity. Settings provides language, appearance, startup restoration opt-ins, service diagnostics, and setup/repair access.
 
 ## Close, restore, update, remove
 
-- Closing the window hides it to the tray.
-- **Exit UI** closes the desktop app and leaves the service running. It does not renew a fan session's deadline.
-- **Restore & exit** in Settings attempts to restore supported controllers and known pre-sync lighting. Failures keep the window open with details. This does not stop the Windows service or restore unknown original lighting.
-- To update or repair, exit the UI and run the downloaded installer with `--install`. Opening it without arguments launches an existing installation. Setup stops the service before replacing files; read the specific release's update notes.
-- Remove through Windows Installed apps or run the installed `LightOrder.exe --uninstall`. Removal requires elevation and stops/deletes the service. The current implementation retains preferences and program files; exit all LightOrder processes before manually removing retained files. Removal of separately installed dependencies is a separate operation.
+- Closing the window hides it to the tray. **Exit UI** leaves continuous cooling, lighting animations, automation, and the service active.
+- **Restore & exit** attempts controller release and known pre-sync lighting restoration. Failures keep the window open. It does not stop the service or disable automation; enabled rules can apply later settings. Disable rules first if future changes should stop.
+- Update/repair by double-clicking the downloaded installer, or using `--install`. The launcher inside the installed directory opens the existing app when run without arguments. A protected staged worker waits for its launcher to exit, stops the service, closes exact installed processes, and replaces files. Existing owner SID, enabled plugins, and preferences survive. Setup tries to reopen the app without elevation; reopen it manually if prompted.
+- Remove through Windows Installed apps or installed `LightOrder.exe --uninstall`. The elevated worker stops/deletes the service, closes installed processes, deletes program files and the uninstall entry, and removes exact LightOrder shortcuts/startup commands. The dialog offers to keep or delete ProgramData preferences, profiles, automation/backend data and the owner's local LightOrder data. Owner-local data deletion requires a resolvable Windows profile; owner-specific Run-entry cleanup requires that owner's registry hive to be loaded. Shared PawnIO and WebView2 remain installed. The staged helper is scheduled for reboot cleanup. Unresolved fan restoration intent or incomplete service deletion blocks file cleanup and retains evidence for recovery.
+
+These lifecycle descriptions reflect source behavior; package-specific clean-machine testing is still required. A stop or process exit alone does not prove hardware restoration.
 
 ## OpenRGB and PawnIO
 
-Memory lighting uses a dedicated OpenRGB SDK v3 endpoint at `127.0.0.1:16742`, restricted to ENE SMBus DRAM. A compatible OpenRGB executable, a complete detector inventory for that exact build, and a running PawnIO driver are required for the managed backend.
+The dedicated OpenRGB SDK v3 endpoint is `127.0.0.1:16742`. ENE SMBus DRAM is enabled by default. Additional physical devices require explicit administrator configuration. The managed backend needs a compatible executable and the complete detector inventory for that exact build. A running PawnIO driver is required when enabled detectors use SMBus.
 
-The release must say whether OpenRGB and a PawnIO installer are included. Source-only builds do not fetch them automatically. When a signed PawnIO installer is supplied to packaging, setup can invoke it and start the installed driver; that does not establish its version, publisher identity, or hardware compatibility. Release maintainers must verify provenance. No Windows security feature needs to be disabled.
+Releases must identify whether OpenRGB and PawnIO are bundled. Source builds do not fetch them. If packaging supplies a signed PawnIO installer, setup can invoke it and start the installed driver; release maintainers must still verify provenance and compatibility. No Windows security feature needs to be disabled.
 
-An administrator can configure `backend.json` beside the installed OpenRGB plugin. Use protected executable/configuration paths and a protected data directory; never point the privileged backend at a user-writable executable. Example for an independently installed, trusted OpenRGB build:
+Administrators can place `backend.json` beside the installed OpenRGB plugin:
 
 ```json
 {
   "executablePath": "C:/Program Files/OpenRGB/OpenRGB.exe",
   "sourceConfigPath": "C:/Program Files/LightOrder/plugins/OpenRgb/detectors.json",
   "dataDirectory": "C:/ProgramData/LightOrder/OpenRgb",
-  "requestTimeoutMs": 5000
+  "requestTimeoutMs": 5000,
+  "enableEneDram": true,
+  "additionalDevices": []
 }
 ```
 
-Without this file, defaults are `runtime/OpenRGB.exe` and `detectors.json` beside the plugin, with state under `%ProgramData%\LightOrder\OpenRgb`. The service deploys trusted plugins; older adapter CLI/environment settings are not a supported way to bypass protected deployment. See [release packaging](build-and-release.md) for optional supply paths.
+Paths must be absolute, local, protected paths; never select a user-writable executable. Without this file, defaults are plugin-local `runtime/OpenRGB.exe` and `detectors.json`, with state under `%ProgramData%\LightOrder\OpenRgb`. CLI/environment overrides do not bypass protected deployment.
 
-The detector inventory must contain every detector from that exact OpenRGB version. The adapter enables only `ENE SMBus DRAM`, uses HID safe mode, and disables ENE persistent saves. Missing new detectors can be enabled by upstream defaults, so an old inventory is not adequate. Close competing RGB controllers yourself; LightOrder does not terminate another user's OpenRGB instance.
+The adapter disables detectors outside the configured allowlist, enables HID safe mode, and disables ENE persistent saves. Every configured detector must exist in the matched complete inventory; an old inventory is insufficient. See [OpenRGB device policy](plugin-development.md#openrgb-device-policy) for exact additional-device rules. Configuration is not a claim of all-hardware support. Close competing RGB controllers yourself; LightOrder refuses a competing OpenRGB instance and does not terminate it.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| Service unavailable | Check `LightOrder.Service` in Windows Services, then Settings → Setup & repair. Reconnect using the installation owner's account. |
-| WebView2 error | Install/update Evergreen Runtime, then reopen setup. |
-| Plugin disconnected | Record its diagnostic category. Check the device and any uncertain prior write before restarting the service; reconnect reads state first. |
-| Memory lighting absent | Check release dependencies, PawnIO status, protected OpenRGB paths, detector inventory, and competing OpenRGB processes. |
-| Fan editor absent | The board, control mapping, permissions, or baseline did not pass the plugin's checks. Read-only mode is intentional. |
-| Restoration unverified | Keep the error details; do not infer recovery from process exit or restart. Check actual fan behavior and the hardware's normal control path. |
+| Service unavailable | Windows Services → `LightOrder.Service`, then Settings → Setup & repair. Reconnect as the installation owner. |
+| WebView2 error | Install/update Evergreen Runtime and reopen setup. |
+| Plugin disconnected or animation stopped | Record diagnostics. Check device state and uncertain prior writes before restarting. |
+| OpenRGB device absent | If `BackendDiscovering` is reported, discovery retries every 15 seconds without setting effects. Otherwise check exact allowlist, inventory, protected paths, required PawnIO status, and competing processes. |
+| Fan editor absent | Board, mapping, permissions, baseline, or unresolved restoration intent may prevent control. Read-only mode is intentional. |
+| Rule paused | Resolve diagnostics, then explicitly save. Do not delete its execution journal to reset it. See [automation recovery](automation.md#failures-and-bounds). |
+| Restoration unverified | Keep details; verify actual fan behavior and normal firmware control. Process exit/restart is not proof. |
 
-Reports should include app/plugin versions, Windows version, hardware model, operation, error category, and whether the observation came from software or the physical device. Remove account SIDs, personal paths, process names, and other private details before posting logs or screenshots.
+Include versions, Windows version, hardware, operation, error category, and whether evidence is software or physical. Remove SIDs, personal paths, process names, and other private details from public logs/screenshots.

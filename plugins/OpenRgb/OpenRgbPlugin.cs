@@ -1,7 +1,5 @@
 using System.Globalization;
 using System.Net.Sockets;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using ControlCenter.Contracts;
 
@@ -29,9 +27,10 @@ public sealed class OpenRgbPlugin : IDevicePlugin
         backend = new(settings); port = ManagedBackend.Port;
     }
     // Mock tests use an ephemeral loopback port; production never accepts a port from RPC/settings.
-    internal OpenRgbPlugin(int testPort)
+    internal OpenRgbPlugin(int testPort, BackendSettings? testSettings = null, bool standardDiscovery = false)
     {
-        settings = new() { RequestTimeoutMs = 1000 }; settingsPath = "mock";
+        settings = testSettings ?? new() { RequestTimeoutMs = 1000 }; settingsPath = standardDiscovery ? "mock-standard" : "mock";
+        DevicePolicy.Validate(settings);
         backend = new(settings); port = testPort;
     }
     public async Task<object> HandleAsync(string method, JsonElement args, CancellationToken cancellationToken)
@@ -119,48 +118,41 @@ public sealed class OpenRgbPlugin : IDevicePlugin
         catch (SocketException)
         {
             await backend.StartAsync(token);
-            for (var attempt = 0; attempt < 12; attempt++)
+            for (var attempt = 0; attempt < 8; attempt++)
             {
-                await Task.Delay(250, token);
+                await Task.Delay(200, token);
                 try { await using var probe = await OpenRgbConnection.ConnectAsync(port, token); break; }
-                catch (SocketException) when (attempt < 11) { }
+                catch (SocketException) when (attempt < 7) { }
             }
         }
         var devices = await DiscoverAsync(token);
+        // The SDK starts listening before detector enumeration finishes. An empty
+        // initial inventory is not proof that discovery completed (SDK v3 has no such ack).
+        for (var attempt = 0; devices.Length == 0 && DevicePolicy.Detectors(settings).Length != 0 && attempt < 8; attempt++)
+        {
+            await Task.Delay(200, token);
+            devices = await DiscoverAsync(token);
+        }
+        if (devices.Length == 0 && DevicePolicy.Detectors(settings).Length != 0)
+            throw new PluginException("BackendDiscovering", "OpenRGB has no allowed devices yet. Detection may still be running, or no configured identity is present; refresh discovery. SDK readiness does not confirm detection completion.");
         return devices.Select(d => new StandardDevice(d.Id, d.Name, d.Kind, d.Capabilities, d.Status, d.Detail,
-            Wire.Element(new { schemaVersion = 1, effects = new[] { "static", "off" }, current = lastCommands.GetValueOrDefault(d.Id), stateSource = lastCommands.ContainsKey(d.Id) ? "last-command" : "unknown", readback = false }))).ToArray();
+            Wire.Element(new { schemaVersion = 1, effects = d.Capabilities.Length == 0 ? Array.Empty<string>() : new[] { "static", "off" }, current = lastCommands.GetValueOrDefault(d.Id), stateSource = lastCommands.ContainsKey(d.Id) ? "last-command" : "unknown", readback = false }))).ToArray();
     }
     private async Task<DeviceInfo[]> DiscoverAsync(CancellationToken token)
     {
         // Clear stale bindings even if the replacement discovery fails.
         discovered.Clear();
         await using var connection = await OpenRgbConnection.ConnectAsync(port, token);
-        var bindings = Bind(await connection.DiscoverAsync(token));
+        var bindings = Bind(await connection.DiscoverAsync(token), settings);
         foreach (var binding in bindings) discovered.Add(binding.Id, binding);
-        return bindings.Select((b, index) => new DeviceInfo(b.Id, $"内存灯光 {index + 1} · {b.Device.Name}", "memory",
-            b.Ambiguous || b.Device.StaticMode < 0 || b.Device.Colors.Length == 0 ? [] : ["lighting.static", "lighting.off"],
-            b.Ambiguous ? "ambiguous" : b.Device.StaticMode < 0 || b.Device.Colors.Length == 0 ? "unsupported" : "ready",
+        return bindings.Select((b, index) => new DeviceInfo(b.Id, b.Device.IsEneDram ? $"内存灯光 {index + 1} · {b.Device.Name}" : b.Device.Name, DevicePolicy.Kind(b.Device.Type),
+            b.Ambiguous || !b.Device.SupportsStatic ? [] : ["lighting.static", "lighting.off"],
+            b.Ambiguous ? "ambiguous" : !b.Device.SupportsStatic ? "unsupported" : "ready",
             b.Ambiguous ? $"Ambiguous identity at SDK index {b.Device.Index}; writes refused. {b.Device.Location}"
-                : $"ENE DRAM; {b.Device.Location}; {b.Device.Colors.Length} LEDs. SDK cache only; physical light state unknown.")).ToArray();
+                : $"OpenRGB {DevicePolicy.Kind(b.Device.Type)}; {b.Device.Location}; {b.Device.Colors.Length} LEDs. SDK cache only; physical light state unknown.")).ToArray();
     }
-    internal static DeviceBinding[] Bind(RgbDevice[] devices)
-    {
-        var targets = devices.Where(d => d.IsEneDram).ToArray();
-        // Location+name survives SDK reordering. Index only distinguishes ambiguous display entries;
-        // it is deliberately never accepted as sufficient identity for a write.
-        var groups = targets.GroupBy(d => Identity(d), StringComparer.Ordinal);
-        var result = new List<DeviceBinding>();
-        foreach (var group in groups)
-        {
-            var ambiguous = group.Count() != 1 || string.IsNullOrWhiteSpace(group.First().Location);
-            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(group.Key))).ToLowerInvariant();
-            foreach (var d in group)
-                result.Add(new($"ene-dram:{hash}" + (ambiguous ? $":index-{d.Index}" : ""), d, ambiguous));
-        }
-        return result.OrderBy(b => b.Device.Index).ToArray();
-    }
-    private static string Identity(RgbDevice d) => JsonSerializer.Serialize(new[] { d.Location.Trim(), d.Name.Trim() });
-    private static bool SameDevice(RgbDevice a, RgbDevice b) => a.IsEneDram && b.IsEneDram && Identity(a) == Identity(b) && a.Serial == b.Serial && a.Version == b.Version && a.Colors.Length == b.Colors.Length;
+    internal static DeviceBinding[] Bind(RgbDevice[] devices, BackendSettings? settings = null) => DevicePolicy.Bind(devices, settings ?? new());
+    private static bool SameDevice(RgbDevice a, RgbDevice b) => DevicePolicy.SameDevice(a, b);
     private static LightingRequest ParseRequest(JsonElement args)
     {
         if (args.ValueKind != JsonValueKind.Object || !args.TryGetProperty("brightness", out var brightness) || !brightness.TryGetDouble(out var number) || !double.IsFinite(number) || number < 0 || number > 1
@@ -182,12 +174,12 @@ public sealed class OpenRgbPlugin : IDevicePlugin
         if (!discovered.TryGetValue(request.DeviceId, out var known)) throw new PluginException("DeviceNotFound", "Discover the current device before applying");
         if (known.Ambiguous) throw new PluginException("AmbiguousDevice", "Controller identity is ambiguous; no write was sent");
         await using var connection = await OpenRgbConnection.ConnectAsync(port, token);
-        var current = Bind(await connection.DiscoverAsync(token)).SingleOrDefault(b => b.Id == request.DeviceId);
+        var current = Bind(await connection.DiscoverAsync(token), settings).SingleOrDefault(b => b.Id == request.DeviceId);
         if (current == null || current.Ambiguous || !SameDevice(known.Device, current.Device))
             throw new PluginException("DeviceChanged", "Controller identity changed; rediscover before applying");
         var device = current.Device;
         var modeIndex = device.StaticMode;
-        if (modeIndex < 0 || device.Colors.Length == 0) throw new PluginException("Unsupported", "ENE controller has no supported Direct/Static per-LED mode");
+        if (!device.SupportsStatic) throw new PluginException("Unsupported", "Controller has no supported Direct/Static per-LED mode");
         // Revalidate the selected index immediately before writing; v3 has no atomic identity+write primitive.
         if (!SameDevice(device, await connection.ReadDeviceAsync(device.Index, token))) throw new PluginException("DeviceChanged", "SDK index changed before write");
         var parsed = uint.Parse(request.Color.AsSpan(1), NumberStyles.HexNumber, CultureInfo.InvariantCulture);

@@ -57,7 +57,8 @@ public static class ServiceProtocol
     private static readonly HashSet<string> Methods = new(StringComparer.Ordinal)
     {
         StandardMethods.Snapshot, StandardMethods.Refresh, StandardMethods.Apply, StandardMethods.Plugins,
-        StandardMethods.ProfilesRead, StandardMethods.ProfilesWrite
+        StandardMethods.ProfilesRead, StandardMethods.ProfilesWrite,
+        StandardMethods.AutomationRead, StandardMethods.AutomationWrite
     };
 
     public static RpcRequest Parse(string line)

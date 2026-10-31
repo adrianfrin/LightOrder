@@ -7,6 +7,7 @@ public static class StandardCapabilities
 {
     public const string LightingStatic = "lighting.static";
     public const string LightingOff = "lighting.off";
+    public const string LightingEffect = "lighting.effect";
     public const string FanProfile = "fan.profile";
     public const string WindowsPowerScheme = "power.windowsScheme";
     public const string ProcessPolicy = "process.policy";

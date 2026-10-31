@@ -103,7 +103,7 @@ public sealed class MainWindow : Window
                 connected = await view.CoreWebView2.ExecuteScriptAsync("typeof state !== 'undefined' && state.connected && !state.loading && preferencesLoaded") == "true";
                 if (connected) break;
             }
-            string[] pages = connected ? ["overview", "lighting", "cooling", "computer", "settings"] : ["overview"];
+            string[] pages = connected ? ["overview", "lighting", "cooling", "automation", "computer", "settings"] : ["overview"];
             foreach (var page in pages)
             {
                 // Page names are fixed literals above, never supplied by the command line or the renderer.
@@ -125,7 +125,7 @@ public sealed class MainWindow : Window
     {
         var uri = new Uri(e.Request.Uri);
         var name = uri.AbsolutePath.TrimStart('/');
-        var allowed = new Dictionary<string, string> { ["index.html"] = "text/html; charset=utf-8", ["app.js"] = "text/javascript; charset=utf-8", ["charts.js"] = "text/javascript; charset=utf-8", ["editor.js"] = "text/javascript; charset=utf-8", ["icons.js"] = "text/javascript; charset=utf-8", ["design.css"] = "text/css; charset=utf-8", ["production.css"] = "text/css; charset=utf-8", ["app-icon.svg"] = "image/svg+xml" };
+        var allowed = new Dictionary<string, string> { ["index.html"] = "text/html; charset=utf-8", ["app.js"] = "text/javascript; charset=utf-8", ["charts.js"] = "text/javascript; charset=utf-8", ["editor.js"] = "text/javascript; charset=utf-8", ["automation.js"] = "text/javascript; charset=utf-8", ["icons.js"] = "text/javascript; charset=utf-8", ["design.css"] = "text/css; charset=utf-8", ["production.css"] = "text/css; charset=utf-8", ["app-icon.svg"] = "image/svg+xml" };
         var stream = uri.GetLeftPart(UriPartial.Authority) == Origin && e.Request.Method == "GET" && allowed.ContainsKey(name)
             ? Assembly.GetExecutingAssembly().GetManifestResourceStream("LightOrder.App.Assets." + name) : null;
         var headers = "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n";
@@ -159,8 +159,10 @@ public sealed class MainWindow : Window
                         snapshot = current; result = current; break;
                     case StandardMethods.Plugins:
                     case StandardMethods.ProfilesRead:
+                    case StandardMethods.AutomationRead:
                         result = await client.CallAsync(method, new { }, lifetime.Token); break;
                     case StandardMethods.ProfilesWrite:
+                    case StandardMethods.AutomationWrite:
                         if (args.GetRawText().Length > 262144 || args.GetProperty("schemaVersion").GetInt32() != 1) throw new InvalidDataException("配置格式无效 / Invalid preferences");
                         result = await client.CallAsync(method, args, lifetime.Token); break;
                     case StandardMethods.Apply:
@@ -190,6 +192,16 @@ public sealed class MainWindow : Window
                 var color = p.GetProperty("color").GetString();
                 var brightness = p.GetProperty("brightness").GetDouble();
                 if (color == null || !System.Text.RegularExpressions.Regex.IsMatch(color, "^#[0-9a-fA-F]{6}$") || !double.IsFinite(brightness) || brightness < 0 || brightness > 1) throw new ArgumentException("颜色或亮度无效 / Invalid color or brightness");
+                break;
+            case StandardCapabilities.LightingEffect:
+                var effect = p.GetProperty("effect").GetString();
+                var animatedColor = p.GetProperty("color").GetString();
+                var intensity = p.GetProperty("brightness").GetDouble();
+                var period = p.GetProperty("periodSeconds").GetDouble();
+                if (effect is not ("breathing" or "rainbow") || animatedColor == null ||
+                    !System.Text.RegularExpressions.Regex.IsMatch(animatedColor, "^#[0-9a-fA-F]{6}$") ||
+                    !double.IsFinite(intensity) || intensity is < 0 or > 1 || !double.IsFinite(period) || period is < 2 or > 60)
+                    throw new ArgumentException("灯效参数无效 / Invalid lighting effect parameters");
                 break;
             case StandardCapabilities.LightingOff: case StandardCapabilities.Release: break;
             case StandardCapabilities.FanProfile: Wire.Read<FanProfile>(p).Validate(); break;

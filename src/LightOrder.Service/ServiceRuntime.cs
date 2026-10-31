@@ -25,7 +25,7 @@ public sealed class ProcessPlugin(PluginDescriptor descriptor, PluginClient clie
 public sealed class DeviceRouter
 {
     private readonly Dictionary<string, (IServicePlugin Plugin, StandardDevice Local)> routes = new(StringComparer.Ordinal);
-    public StandardDevice[] Devices => routes.Select(p => p.Value.Local with { Id = p.Key }).ToArray();
+    public StandardDevice[] Devices => routes.Select(p => LightingEffects.Advertise(p.Value.Local with { Id = p.Key })).ToArray();
     public void Clear() => routes.Clear();
     public void Remove(IServicePlugin plugin)
     {
@@ -61,7 +61,7 @@ public sealed class DeviceRouter
     {
         if (command is null || command.DeviceId is null || !routes.TryGetValue(command.DeviceId, out var route))
             throw new PluginException("DeviceUnavailable", "Device was not discovered or its plugin is disconnected. Refresh discovery.");
-        if (command.Capability is null || !route.Local.Capabilities.Contains(command.Capability, StringComparer.Ordinal))
+        if (command.Capability is null || !(command.Capability == StandardCapabilities.LightingEffect && LightingEffects.CanAnimate(route.Local)) && !route.Local.Capabilities.Contains(command.Capability, StringComparer.Ordinal))
             throw new PluginException("CapabilityNotSupported", "The discovered device does not advertise this capability.");
         if (command.Parameters.ValueKind != JsonValueKind.Object || JsonSerializer.SerializeToUtf8Bytes(command.Parameters, Wire.Json).Length > 65536)
             throw new PluginException("InvalidArgument", "Device parameters must be an object of at most 64 KiB.");
@@ -100,10 +100,103 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
     private readonly List<IServicePlugin> plugins = [];
     private readonly List<PluginDescriptor> descriptors = [];
     private readonly HashSet<IServicePlugin> faulted = [];
+    private readonly HashSet<IServicePlugin> discoveryPending = [];
+    // Keep tracking a fan plugin even if a later descriptor becomes read-only and drops fan.profile.
+    private readonly HashSet<IServicePlugin> sessionDescriptors = [];
+    private DateTimeOffset nextDiscoveryRetry;
     private readonly DeviceRouter router = new();
     private readonly Queue<string> diagnostics = new();
     private bool stopping;
-    private bool disposed;
+    private readonly object lifetimeLock = new();
+    private Task? disposeTask;
+    private readonly LightingEffects effects = new();
+    private AutomationEngine? automation;
+    private CancellationTokenSource? controlLifetime;
+    private Task? controlLoop;
+
+    public void ConfigureAutomation(AutomationEngine engine) => automation = engine;
+
+    public void ValidateCommand(DeviceCommand command)
+    {
+        _ = router.Resolve(command);
+        if (command.Capability == StandardCapabilities.LightingEffect)
+            _ = LightingAnimation.Parse(command.Parameters, DateTimeOffset.UtcNow);
+        else if (command.Capability == StandardCapabilities.FanProfile)
+            Wire.Read<FanProfile>(command.Parameters).Validate();
+        else if (command.Capability == StandardCapabilities.LightingStatic)
+        {
+            var p = command.Parameters;
+            if (!p.TryGetProperty("color", out var color) || color.ValueKind != JsonValueKind.String ||
+                !System.Text.RegularExpressions.Regex.IsMatch(color.GetString()!, "^#[0-9a-fA-F]{6}$") ||
+                !p.TryGetProperty("brightness", out var brightness) || !brightness.TryGetDouble(out var value) || !double.IsFinite(value) || value is < 0 or > 1)
+                throw new PluginException("InvalidArgument", "Invalid static color or brightness.");
+        }
+        else if (command.Capability == StandardCapabilities.WindowsPowerScheme)
+        {
+            if (!command.Parameters.TryGetProperty("schemeId", out var scheme) || scheme.ValueKind != JsonValueKind.String || !Guid.TryParse(scheme.GetString(), out _))
+                throw new PluginException("InvalidArgument", "Power scheme ID must be a GUID.");
+        }
+        else if (command.Capability == StandardCapabilities.ProcessPolicy)
+        {
+            var p = command.Parameters;
+            if (!p.TryGetProperty("priority", out var priority) || priority.ValueKind != JsonValueKind.String ||
+                priority.GetString() is not ("Idle" or "BelowNormal" or "Normal" or "AboveNormal" or "High"))
+                throw new PluginException("InvalidArgument", "Invalid process priority.");
+            if (p.TryGetProperty("pid", out var pid) && (!pid.TryGetInt32(out var id) || id <= 0) ||
+                p.TryGetProperty("startTimeUtc", out var start) && (start.ValueKind != JsonValueKind.String || !start.TryGetDateTimeOffset(out _)))
+                throw new PluginException("InvalidArgument", "Invalid process identity.");
+            if (p.TryGetProperty("affinityMask", out var mask) && (mask.ValueKind != JsonValueKind.String ||
+                !System.Text.RegularExpressions.Regex.IsMatch(mask.GetString()!, "^(0x)?[0-9a-fA-F]{1,16}$") ||
+                mask.GetString()!.Replace("0x", "", StringComparison.Ordinal).All(c => c == '0')))
+                throw new PluginException("InvalidArgument", "Invalid CPU affinity mask.");
+        }
+    }
+
+    public Task<ApplyResult> ExecuteAutomatedAsync(DeviceCommand command) => ExecuteCommandAsync(command, 0);
+
+    public void StartControlLoop(CancellationToken token)
+    {
+        lock (lifetimeLock)
+        {
+            if (disposeTask is not null) throw new ObjectDisposedException(nameof(ServiceRuntime));
+            if (controlLoop is not null) throw new InvalidOperationException("Control loop already started.");
+            controlLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+            controlLoop = RunControlLoopAsync(controlLifetime.Token);
+        }
+    }
+
+    private async Task RunControlLoopAsync(CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(250));
+        var nextAutomation = DateTimeOffset.MinValue;
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                await gate.WaitAsync(token);
+                try
+                {
+                    if (stopping) return;
+                    await effects.TickAsync(command => ExecutePluginAsync(command, 0), AddDiagnostic);
+                    var now = DateTimeOffset.UtcNow;
+                    if (discoveryPending.Count > 0 && now >= nextDiscoveryRetry)
+                    {
+                        nextDiscoveryRetry = now.AddSeconds(15);
+                        foreach (var plugin in discoveryPending.ToArray()) await DiscoverPluginAsync(plugin);
+                    }
+                    if (automation is not null && now >= nextAutomation)
+                    {
+                        nextAutomation = now.AddSeconds(1);
+                        try { await automation.TickAsync(now, token); }
+                        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                        catch (Exception error) { AddDiagnostic("Automation tick failed: " + Category(error)); }
+                    }
+                }
+                finally { gate.Release(); }
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
 
     public string[] Diagnostics
     {
@@ -138,6 +231,67 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
             }
         }
         await RefreshAsync(token);
+        await RestoreStartupPreferencesAsync(token);
+    }
+
+    private async Task RestoreStartupPreferencesAsync(CancellationToken token)
+    {
+        await gate.WaitAsync(token);
+        try
+        {
+            JsonElement saved;
+            try { saved = profiles.Read(); }
+            catch (Exception error) { AddDiagnostic("Startup preferences unavailable: " + Category(error)); return; }
+            bool Enabled(string key) => saved.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.True;
+            if (Enabled("restoreLightingOnStartup") &&
+                !(saved.TryGetProperty("pendingLighting", out var pending) && pending.ValueKind is not JsonValueKind.Null) &&
+                saved.TryGetProperty("appliedLighting", out var lighting) && lighting.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var item in lighting.EnumerateObject().Take(16))
+                {
+                    token.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var effect = item.Value.GetProperty("effect").GetString();
+                        var capability = effect switch
+                        {
+                            "off" => StandardCapabilities.LightingOff,
+                            "static" => StandardCapabilities.LightingStatic,
+                            "breathing" or "rainbow" => StandardCapabilities.LightingEffect,
+                            _ => throw new PluginException("InvalidArgument", "Unknown saved lighting effect.")
+                        };
+                        var parameters = new Dictionary<string, object?>
+                        {
+                            ["color"] = item.Value.GetProperty("color").GetString(),
+                            ["brightness"] = item.Value.GetProperty("brightness").GetDouble(),
+                            ["operationId"] = Guid.NewGuid().ToString("N")
+                        };
+                        if (capability == StandardCapabilities.LightingEffect)
+                        {
+                            parameters["effect"] = effect;
+                            parameters["periodSeconds"] = item.Value.TryGetProperty("periodSeconds", out var period) ? period.GetDouble() : 6;
+                        }
+                        await ExecuteCommandAsync(new DeviceCommand(item.Name, capability, Wire.Element(parameters)), 0);
+                        AddDiagnostic("Startup lighting restored for " + item.Name + "; physical readback unavailable.");
+                    }
+                    catch (Exception error) { AddDiagnostic("Startup lighting skipped for " + item.Name + ": " + Category(error) + ". No retry."); }
+                }
+            }
+            if (Enabled("restoreCoolingOnStartup") && saved.TryGetProperty("fanProfiles", out var fans) && fans.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var item in fans.EnumerateObject().Take(16))
+                {
+                    token.ThrowIfCancellationRequested();
+                    try
+                    {
+                        await ExecuteCommandAsync(new DeviceCommand(item.Name, StandardCapabilities.FanProfile, item.Value.Clone()), 0);
+                        AddDiagnostic("Startup cooling profile requested for " + item.Name + ".");
+                    }
+                    catch (Exception error) { AddDiagnostic("Startup cooling skipped for " + item.Name + ": " + Category(error) + ". No retry."); }
+                }
+            }
+        }
+        finally { gate.Release(); }
     }
 
     // Also used by the hardware-free test executable. No process is launched here.
@@ -158,7 +312,7 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
             {
                 case StandardMethods.Refresh:
                     await DiscoverAsync(token);
-                    return await SnapshotAsync(token);
+                    return await SnapshotAsync(token, refreshSessionDescriptors: false);
                 case StandardMethods.Snapshot:
                     return await SnapshotAsync(token);
                 case StandardMethods.Plugins:
@@ -167,28 +321,51 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
                     DeviceCommand command;
                     try { command = parameters.Deserialize<DeviceCommand>(ServiceSettings.StrictJson) ?? throw new JsonException(); }
                     catch (JsonException) { throw new PluginException("InvalidArgument", "app.execute requires a DeviceCommand."); }
-                    var route = router.Resolve(command);
-                    try
-                    {
-                        var raw = await route.Plugin.CallAsync(route.Method, route.Command);
-                        var applied = Wire.Read<ApplyResult>(raw);
-                        if (string.IsNullOrWhiteSpace(applied.Status) || applied.Status.Length > 128 || applied.Detail is null || applied.Detail.Length > 4096)
-                            throw new InvalidDataException("Invalid command result.");
-                        AddDiagnostic($"Command {correlationId}: {route.Plugin.Descriptor.Id} {command.Capability} {applied.Status}.");
-                        return applied;
-                    }
-                    catch (Exception e)
-                    {
-                        if (IsTransportFailure(e)) Fault(route.Plugin, e);
-                        AddDiagnostic($"Command {correlationId}: {route.Plugin.Descriptor.Id} {Category(e)}. No retry.");
-                        throw ToPublicError(e);
-                    }
+                    return await ExecuteCommandAsync(command, correlationId);
+                case StandardMethods.AutomationRead:
+                    if (automation is null) throw new PluginException("AutomationUnavailable", "Automation has not been configured.");
+                    var document = automation.Read();
+                    return JsonSerializer.SerializeToElement(document, AutomationValidation.Json);
+                case StandardMethods.AutomationWrite:
+                    if (automation is null) throw new PluginException("AutomationUnavailable", "Automation has not been configured.");
+                    return automation.Write(parameters);
                 case StandardMethods.ProfilesRead: return profiles.Read();
                 case StandardMethods.ProfilesWrite: return profiles.Write(parameters);
                 default: throw new PluginException("MethodNotAllowed", "Unknown or forbidden service method.");
             }
         }
         finally { gate.Release(); }
+    }
+
+    private async Task<ApplyResult> ExecuteCommandAsync(DeviceCommand command, long correlationId)
+    {
+        ValidateCommand(command);
+        if (command.Capability == StandardCapabilities.LightingEffect)
+            return await effects.StartAsync(command, frame => ExecutePluginAsync(frame, correlationId));
+        if (command.Capability is StandardCapabilities.LightingStatic or StandardCapabilities.LightingOff or StandardCapabilities.Release)
+            effects.Stop(command.DeviceId);
+        return await ExecutePluginAsync(command, correlationId);
+    }
+
+    private async Task<ApplyResult> ExecutePluginAsync(DeviceCommand command, long correlationId)
+    {
+        var route = router.Resolve(command);
+        try
+        {
+            var raw = await route.Plugin.CallAsync(route.Method, route.Command);
+            var applied = Wire.Read<ApplyResult>(raw);
+            if (string.IsNullOrWhiteSpace(applied.Status) || applied.Status.Length > 128 || applied.Detail is null || applied.Detail.Length > 4096)
+                throw new InvalidDataException("Invalid command result.");
+            // Animation frames are frequent; diagnostics record user/rule commands and failures only.
+            if (correlationId != 0) AddDiagnostic($"Command {correlationId}: {route.Plugin.Descriptor.Id} {command.Capability} {applied.Status}.");
+            return applied;
+        }
+        catch (Exception error)
+        {
+            if (IsTransportFailure(error)) Fault(route.Plugin, error);
+            AddDiagnostic($"Command {correlationId}: {route.Plugin.Descriptor.Id} {Category(error)}. No retry.");
+            throw ToPublicError(error);
+        }
     }
 
     private async Task RefreshAsync(CancellationToken token)
@@ -203,17 +380,39 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
         foreach (var plugin in plugins.Where(p => !faulted.Contains(p)))
         {
             token.ThrowIfCancellationRequested();
-            try { router.Replace(plugin, Wire.Read<StandardDevice[]>(await plugin.CallAsync(StandardMethods.Discover, new { }))); }
-            catch (Exception e) { Fault(plugin, e); }
+            await DiscoverPluginAsync(plugin);
         }
     }
-    private async Task<ServiceSnapshot> SnapshotAsync(CancellationToken token)
+    private async Task DiscoverPluginAsync(IServicePlugin plugin)
+    {
+        try
+        {
+            var devices = Wire.Read<StandardDevice[]>(await plugin.CallAsync(StandardMethods.Discover, new { }));
+            router.Replace(plugin, devices);
+            if (devices.Any(d => d.Capabilities.Contains(StandardCapabilities.FanProfile, StringComparer.Ordinal)))
+                sessionDescriptors.Add(plugin);
+            if (discoveryPending.Remove(plugin)) AddDiagnostic("Device discovery ready for " + plugin.Descriptor.Id + ". No commands replayed.");
+        }
+        catch (PluginException error) when (error.Code == "BackendDiscovering")
+        {
+            router.Remove(plugin);
+            if (discoveryPending.Add(plugin)) AddDiagnostic("Device discovery pending for " + plugin.Descriptor.Id + "; read-only retry every 15 seconds.");
+        }
+        catch (Exception error) { discoveryPending.Remove(plugin); Fault(plugin, error); }
+    }
+    private async Task<ServiceSnapshot> SnapshotAsync(CancellationToken token, bool refreshSessionDescriptors = true)
     {
         var telemetry = new List<JsonElement>();
         var telemetryBytes = 0;
-        foreach (var plugin in plugins.Where(p => !faulted.Contains(p)))
+        foreach (var plugin in plugins.Where(p => !faulted.Contains(p) && !discoveryPending.Contains(p)))
         {
             token.ThrowIfCancellationRequested();
+            // Fan session state lives in Discover metadata; other plugins may perform expensive scans.
+            if (refreshSessionDescriptors && sessionDescriptors.Contains(plugin))
+            {
+                await DiscoverPluginAsync(plugin);
+                if (faulted.Contains(plugin) || discoveryPending.Contains(plugin)) continue;
+            }
             try
             {
                 var samples = router.ValidateTelemetry(plugin, await plugin.CallAsync(StandardMethods.Telemetry, new { }));
@@ -225,8 +424,8 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
             catch (Exception e) { Fault(plugin, e); }
         }
         string[] messages;
-        lock (diagnostics) messages = diagnostics.ToArray();
-        return new ServiceSnapshot("1.0.0", router.Devices, telemetry.ToArray(), messages);
+        lock (diagnostics) messages = diagnostics.Concat(automation?.Diagnostics ?? []).TakeLast(64).ToArray();
+        return new ServiceSnapshot("1.0.0", router.Devices.Select(effects.Describe).ToArray(), telemetry.ToArray(), messages);
     }
     private void Fault(IServicePlugin plugin, Exception e)
     {
@@ -241,13 +440,33 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
         ? new PluginException(p.Code, p.Code == "TimeoutOutcomeUnknown" ? "Plugin timed out. Outcome unknown; no retry. Check the device before restarting the service." : "Plugin rejected the request: " + p.Code)
         : new PluginException("PluginUnavailable", "Plugin communication failed. Outcome may be unknown; no retry. Refresh the device list.");
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
+        lock (lifetimeLock)
+            return new ValueTask(disposeTask ??= DisposeCoreAsync());
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        // Publish the shared task before cancellation callbacks or plugin cleanup can run.
+        await Task.Yield();
+        if (controlLifetime is not null)
+        {
+            try { await controlLifetime.CancelAsync(); }
+            catch (Exception error) { AddDiagnostic("Control cancellation failed: " + Category(error) + ". Continuing restoration."); }
+        }
+        if (controlLoop is not null)
+        {
+            try { await controlLoop; }
+            catch (Exception error) { AddDiagnostic("Control loop stopped: " + Category(error) + ". Continuing restoration."); }
+        }
+        // Never hold gate while waiting for the control loop: it may itself be waiting for gate.
+        controlLifetime?.Dispose();
         await gate.WaitAsync();
         try
         {
-            if (disposed) return;
             stopping = true;
+            await effects.FinishAsync(command => ExecutePluginAsync(command, 0), AddDiagnostic);
             // Release every worker even after an earlier worker fails. No automatic command replay.
             foreach (var plugin in plugins.AsEnumerable().Reverse())
             {
@@ -265,7 +484,6 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
             }
             router.Clear();
             plugins.Clear();
-            disposed = true;
         }
         finally { gate.Release(); }
     }

@@ -17,6 +17,7 @@ internal sealed record RgbDevice(uint Index, uint Type, string Name, string Vend
     uint ActiveMode, RgbMode[] Modes, uint[] Colors)
 {
     public bool IsEneDram => Type == 1 && Description == "ENE SMBus Device";
+    public bool SupportsStatic => StaticMode >= 0 && Colors.Length > 0;
     public int StaticMode => Array.FindIndex(Modes, m => m.Name.Equals("Direct", StringComparison.OrdinalIgnoreCase) && (m.Flags & 32) != 0) is var direct && direct >= 0
         ? direct : Array.FindIndex(Modes, m => m.Name.Equals("Static", StringComparison.OrdinalIgnoreCase) && (m.Flags & 32) != 0);
 }

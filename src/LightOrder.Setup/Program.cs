@@ -8,7 +8,7 @@ using Microsoft.Win32;
 
 namespace LightOrder.Setup;
 
-internal static class Program
+internal static partial class Program
 {
     private const string ServiceName = "LightOrder.Service";
     private static readonly string InstallRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "LightOrder");
@@ -19,42 +19,54 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         try
         {
-            if (args is ["--self-test"])
-            {
-                ValidateEntry("plugins/a/plugin.json");
-                if (!IsDirectoryEntry("docs/", "") || !IsDirectoryEntry("docs\\", "docs\\") || IsDirectoryEntry("docs/readme.md", "readme.md")) return 1;
-                try { ValidateEntry("../escape.exe"); return 1; } catch (InvalidDataException) { return 0; }
-            }
-            if (args is ["--install-worker", var sid])
+            if (args is ["--self-test"]) return SetupSelfTests.Run();
+            if (args is ["--install-worker", var workerSid])
             {
                 if (!IsAdmin()) throw new UnauthorizedAccessException("Administrator access is required.");
-                _ = new SecurityIdentifier(sid);
-                Install(sid); return 0;
+                using var identity = WindowsIdentity.GetCurrent();
+                if (LifecycleSafety.ValidateOwnerSid(workerSid).Value != identity.User?.Value) throw new UnauthorizedAccessException("Initial owner must match this worker's account.");
+                if (LifecycleSafety.SamePath(Environment.ProcessPath!, Path.Combine(InstallRoot, "LightOrder.exe"))) throw new IOException("Synchronous worker must run outside the installed directory; use --install for in-place setup.");
+                using var gate = new Mutex(false, @"Global\LightOrder.Setup.Lifecycle");
+                var acquired = false;
+                try
+                {
+                    try { acquired = gate.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
+                    if (!acquired) throw new IOException("Another lifecycle operation is in progress.");
+                    Install(workerSid); return 0;
+                }
+                finally { if (acquired) gate.ReleaseMutex(); }
             }
+            if (args.Length > 0 && args[0] == "--execute-worker") return ExecuteWorker(args);
+            if (args.Length > 0 && args[0] == "--stage-worker") return StageWorker(args);
             if (args is ["--uninstall"])
             {
-                if (!IsAdmin()) return Elevate(["--uninstall"]);
-                if (MessageBox.Show("停止并移除 LightOrder 服务？用户配置会保留。\nStop and uninstall LightOrder service? Preferences will be retained.", "LightOrder", MessageBoxButtons.OKCancel) != DialogResult.OK) return 0;
-                Run("sc.exe", ["stop", ServiceName], [0, 1060, 1062]);
-                WaitStopped();
-                Run("sc.exe", ["delete", ServiceName], [0, 1060]);
-                Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LightOrder", false);
-                MessageBox.Show("服务已移除。程序文件保留在安装目录，可在退出所有 LightOrder 进程后删除。\nService removed. Program files can be deleted after all LightOrder processes exit.", "LightOrder"); return 0;
+                var choice = MessageBox.Show("卸载 LightOrder 服务和程序文件。\n是否保留偏好设置、灯光配置和专用 OpenRGB 数据？\n\nUninstall LightOrder service and program files.\nKeep preferences, profiles and dedicated OpenRGB data?\n\n是 / Yes: 保留 / Keep\n否 / No: 删除 / Delete\n取消 / Cancel: 退出 / Exit\n\n共享 PawnIO 和 WebView2 将保留。Shared PawnIO and WebView2 are retained.", "LightOrder", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                if (choice == DialogResult.Cancel) return 0;
+                return BeginOperation("uninstall", choice == DialogResult.Yes ? "keep" : "delete");
             }
             var app = Path.Combine(InstallRoot, "LightOrder.App.exe");
-            if (args.Length == 0 && File.Exists(app)) { Process.Start(new ProcessStartInfo(app) { UseShellExecute = true }); return 0; }
+            if (args.Length == 0 && File.Exists(app) && LifecycleSafety.SamePath(Environment.ProcessPath!, Path.Combine(InstallRoot, "LightOrder.exe")))
+            { Process.Start(new ProcessStartInfo(app) { UseShellExecute = true }); return 0; }
             if (args.Length > 0 && args is not ["--install"]) throw new ArgumentException("Unknown setup option.");
-            if (MessageBox.Show("首次配置将安装本地硬件服务和设备插件。之后日常使用无需重复管理员授权。\n\nFirst setup installs a local hardware service and plugins. Normal use does not require repeated elevation.\n\n继续 / Continue?", "光序 LightOrder", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return 0;
-            using var user = WindowsIdentity.GetCurrent();
-            var ownerSid = user.User?.Value ?? throw new InvalidOperationException("Cannot determine installation owner.");
-            var code = Elevate(["--install-worker", ownerSid]);
-            if (code != 0) throw new InvalidOperationException($"Installation failed ({code}).");
-            Process.Start(new ProcessStartInfo(app) { UseShellExecute = true }); return 0;
+            var message = File.Exists(app)
+                ? "更新光序及本地硬件服务，保留现有配置。安装后可从桌面或开始菜单打开。\n\nUpdate LightOrder and its hardware service, keeping your settings. Launch from the desktop or Start menu."
+                : "安装光序、本地硬件服务和插件，并创建桌面及开始菜单快捷方式。之后日常使用无需重复管理员授权。\n\nInstall LightOrder, its hardware service and plugins, with desktop and Start menu shortcuts. Normal use does not require repeated elevation.";
+            if (MessageBox.Show(message + "\n\n继续 / Continue?", "光序 LightOrder", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return 0;
+            return BeginOperation("install", "keep");
         }
         catch (Exception e)
         {
-            try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "LightOrder-setup-error.log"), DateTimeOffset.UtcNow + "\n" + e); } catch { }
-            MessageBox.Show(e.Message + "\n\nLog: " + Path.Combine(Path.GetTempPath(), "LightOrder-setup-error.log"), "LightOrder", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
+            var log = "";
+            try
+            {
+                var folder = args.Length > 0 && args[0] == "--execute-worker" ? Path.GetDirectoryName(Environment.ProcessPath!)! : Path.GetTempPath();
+                log = Path.Combine(folder, "LightOrder-setup-error-" + Guid.NewGuid().ToString("N") + ".log");
+                using var file = new FileStream(log, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                using var writer = new StreamWriter(file); writer.Write(DateTimeOffset.UtcNow + "\n" + e);
+            }
+            catch { }
+            if (args.Length > 0 && args[0] == "--install-worker") { Console.Error.WriteLine(e + "\nLog: " + log); return 1; }
+            MessageBox.Show(e.Message + "\n\nLog: " + log, "LightOrder", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
         }
     }
     private static bool IsAdmin()
@@ -74,56 +86,49 @@ internal static class Program
         using var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("LightOrder.payload.zip")
             ?? throw new InvalidOperationException("This is a development build without an installation payload.");
         if (!WebViewInstalled()) throw new InvalidOperationException("请先安装 Microsoft Edge WebView2 Runtime，再重试。\nInstall Microsoft Edge WebView2 Runtime first: https://developer.microsoft.com/microsoft-edge/webview2/");
-        CheckNoReparse(InstallRoot); CheckNoReparse(DataRoot);
+        LifecycleSafety.ValidateOwnerSid(ownerSid);
+        InspectFixedRoots();
+        var configurationPath = Path.Combine(DataRoot, "service.json");
+        // Existing installation ownership and enabled plugins survive upgrades byte for byte.
+        if (File.Exists(configurationPath)) LifecycleSafety.ValidateConfiguration(File.ReadAllBytes(configurationPath));
         Directory.CreateDirectory(InstallRoot); Directory.CreateDirectory(DataRoot);
         SecureDirectory(InstallRoot, readUsers: true); SecureDirectory(DataRoot, readUsers: false);
-        Run("sc.exe", ["stop", ServiceName], [0,1060,1062]); WaitStopped();
-        using (var zip = new ZipArchive(payload, ZipArchiveMode.Read))
-        {
-            foreach (var entry in zip.Entries)
-            {
-                ValidateEntry(entry.FullName);
-                var dest = Path.GetFullPath(Path.Combine(InstallRoot, entry.FullName));
-                if (!dest.StartsWith(InstallRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Payload path escapes installation.");
-                CheckNoReparse(dest);
-                if (IsDirectoryEntry(entry.FullName, entry.Name)) { Directory.CreateDirectory(dest); continue; }
-                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                if (File.Exists(dest))
-                {
-                    using var existing = File.OpenRead(dest);
-                    using var incoming = entry.Open();
-                    if (System.Security.Cryptography.SHA256.HashData(existing).AsSpan().SequenceEqual(System.Security.Cryptography.SHA256.HashData(incoming))) continue;
-                }
-                entry.ExtractToFile(dest, true);
-            }
-        }
+        var openRgbData = Path.Combine(DataRoot, "OpenRgb");
+        CheckNoReparse(openRgbData); Directory.CreateDirectory(openRgbData); SecureDirectory(openRgbData, readUsers: false);
+        WindowsLifecycle.StopService(ServiceName);
+        LifecycleSafety.RefuseUnresolvedRestoration(DataRoot);
+        WindowsLifecycle.CloseInstalledProcesses(InstallRoot, DataRoot);
+        using (var zip = new ZipArchive(payload, ZipArchiveMode.Read)) ApplyPayload(zip, InstallRoot);
         // Apply protected ACLs recursively, including files left by a previous installation.
         SecureTree(InstallRoot, true); SecureTree(DataRoot, false);
         var ownPath = Environment.ProcessPath!;
         var bootstrap = Path.Combine(InstallRoot, "LightOrder.exe");
         if (!Path.GetFullPath(ownPath).Equals(bootstrap, StringComparison.OrdinalIgnoreCase)) File.Copy(ownPath, bootstrap, true);
         SecureFile(bootstrap, true);
-        var config = new { schemaVersion = 1, ownerSid, enabledPlugins = new[] { "local.gigabyte-it5702", "local.openrgb", "local.hardware-monitor", "local.windows-policy" } };
-        File.WriteAllText(Path.Combine(DataRoot, "service.json"), JsonSerializer.Serialize(config));
-        SecureFile(Path.Combine(DataRoot, "service.json"), false);
+        EnsureConfiguration(DataRoot, ownerSid);
+        SecureFile(configurationPath, false);
         var driver = Path.Combine(InstallRoot, "dependencies", "PawnIO_setup.exe");
         if (File.Exists(driver) && !DriverInstalled())
         {
             VerifySignature(driver);
             Run(driver, ["-install", "-silent"], [0,3010]);
         }
-        if (DriverInstalled()) Run("sc.exe", ["start", "PawnIO"], [0,1056]);
+        if (DriverInstalled()) Run(WindowsLifecycle.Tool("sc.exe"), ["start", "PawnIO"], [0,1056]);
         var service = Path.Combine(InstallRoot, "LightOrder.Service.exe");
-        var create = Run("sc.exe", ["create", ServiceName, "binPath=", '"' + service + '"', "start=", "auto", "DisplayName=", "LightOrder Hardware Service"], [0,1073]);
-        if (create == 1073) Run("sc.exe", ["config", ServiceName, "binPath=", '"' + service + '"', "start=", "auto"], [0]);
-        Run("sc.exe", ["description", ServiceName, "LightOrder local hardware plugin host. Restore control before uninstalling."], [0]);
-        if (DriverInstalled()) Run("sc.exe", ["config", ServiceName, "depend=", "PawnIO"], [0]);
-        Run("sc.exe", ["start", ServiceName], [0,1056]);
+        var create = Run(WindowsLifecycle.Tool("sc.exe"), ["create", ServiceName, "binPath=", '"' + service + '"', "start=", "auto", "DisplayName=", "LightOrder Hardware Service"], [0,1073]);
+        if (create == 1073) Run(WindowsLifecycle.Tool("sc.exe"), ["config", ServiceName, "binPath=", '"' + service + '"', "start=", "auto"], [0]);
+        Run(WindowsLifecycle.Tool("sc.exe"), ["description", ServiceName, "LightOrder local hardware plugin host. Restore control before uninstalling."], [0]);
+        if (DriverInstalled()) Run(WindowsLifecycle.Tool("sc.exe"), ["config", ServiceName, "depend=", "PawnIO"], [0]);
+        Run(WindowsLifecycle.Tool("sc.exe"), ["start", ServiceName], [0,1056]);
+        WindowsLifecycle.WaitService(ServiceName, stopped: false);
         VerifyServiceReady();
         using var uninstall = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LightOrder");
-        uninstall.SetValue("DisplayName", "LightOrder / 光序"); uninstall.SetValue("DisplayVersion", "0.1.0");
+        uninstall.SetValue("DisplayName", "LightOrder / 光序"); uninstall.SetValue("DisplayVersion", "0.2.0");
         uninstall.SetValue("Publisher", "LightOrder contributors"); uninstall.SetValue("InstallLocation", InstallRoot);
         uninstall.SetValue("UninstallString", '"' + bootstrap + "\" --uninstall");
+        uninstall.SetValue("DisplayIcon", Path.Combine(InstallRoot, "LightOrder.App.exe") + ",0");
+        uninstall.SetValue("NoModify", 1); uninstall.SetValue("NoRepair", 1);
+        InstallShortcuts();
     }
     private static void VerifyServiceReady()
     {
@@ -151,7 +156,7 @@ internal static class Program
     private static void VerifySignature(string file)
     {
         var command = "$s=Get-AuthenticodeSignature -LiteralPath '" + file.Replace("'", "''") + "'; if($s.Status -ne 'Valid'){exit 1}";
-        Run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], [0]);
+        Run(Path.Combine(WindowsLifecycle.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", command], [0]);
     }
     private static bool DriverInstalled() { using var key=Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\PawnIO"); return key is not null; }
     private static bool WebViewInstalled()
@@ -165,16 +170,9 @@ internal static class Program
         }
         return false;
     }
-    private static bool IsDirectoryEntry(string fullName, string name) => fullName.EndsWith('/') || fullName.EndsWith('\\') || string.IsNullOrEmpty(name);
-    private static void ValidateEntry(string entry)
-    {
-        if (string.IsNullOrWhiteSpace(entry) || Path.IsPathRooted(entry) || entry.Contains(':') || entry.Replace('\\','/').Split('/').Any(s=>s=="..")) throw new InvalidDataException("Unsafe payload entry.");
-    }
-    private static void CheckNoReparse(string target)
-    {
-        for(var current=Path.GetFullPath(target);!string.IsNullOrEmpty(current);current=Path.GetDirectoryName(current))
-            if((File.Exists(current)||Directory.Exists(current)) && (File.GetAttributes(current)&FileAttributes.ReparsePoint)!=0)throw new IOException("Installation path cannot contain reparse points.");
-    }
+    private static bool IsDirectoryEntry(string fullName, string name) => LifecycleSafety.IsDirectoryEntry(fullName, name);
+    private static void ValidateEntry(string entry) => LifecycleSafety.ValidateEntry(entry);
+    private static void CheckNoReparse(string target) => LifecycleSafety.CheckNoReparse(target);
     private static FileSystemAccessRule Rule(WellKnownSidType sid,FileSystemRights rights,bool directory)=>new(new SecurityIdentifier(sid,null),rights,directory?InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit:InheritanceFlags.None,PropagationFlags.None,AccessControlType.Allow);
     private static void SecureDirectory(string folder,bool readUsers)
     {
@@ -191,20 +189,53 @@ internal static class Program
     {
         foreach(var entry in Directory.EnumerateFileSystemEntries(folder)) { CheckNoReparse(entry); if(Directory.Exists(entry)){SecureDirectory(entry,readUsers);SecureTree(entry,readUsers);}else SecureFile(entry,readUsers); }
     }
-    private static int Run(string exe,string[] args,int[] accepted)
+    internal static int Run(string exe,string[] args,int[] accepted)
     {
         var info=new ProcessStartInfo(exe){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};foreach(var arg in args)info.ArgumentList.Add(arg);
-        using var p=Process.Start(info)??throw new IOException("Cannot start "+exe);var output=p.StandardOutput.ReadToEndAsync();var error=p.StandardError.ReadToEndAsync();if(!p.WaitForExit(120000))throw new TimeoutException(exe+" timed out");Task.WaitAll(output,error);if(!accepted.Contains(p.ExitCode))throw new InvalidOperationException(exe+" failed: "+output.Result+error.Result);return p.ExitCode;
+        using var p=Process.Start(info)??throw new IOException("Cannot start "+exe);var output=p.StandardOutput.ReadToEndAsync();var error=p.StandardError.ReadToEndAsync();if(!p.WaitForExit(120000)){p.Kill(entireProcessTree:false);p.WaitForExit(5000);throw new TimeoutException(exe+" timed out");}Task.WaitAll(output,error);if(!accepted.Contains(p.ExitCode))throw new InvalidOperationException(exe+" failed: "+output.Result+error.Result);return p.ExitCode;
     }
-    private static void WaitStopped()
+    internal static void EnsureConfiguration(string dataRoot, string ownerSid)
     {
-        for(var i=0;i<30;i++)
+        LifecycleSafety.ValidateOwnerSid(ownerSid);
+        var path = Path.Combine(dataRoot, "service.json");
+        CheckNoReparse(path);
+        if (File.Exists(path)) { LifecycleSafety.ValidateConfiguration(File.ReadAllBytes(path)); return; }
+        var config = new { schemaVersion = 1, ownerSid, enabledPlugins = new[] { "local.gigabyte-it5702", "local.openrgb", "local.hardware-monitor", "local.windows-policy" } };
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        JsonSerializer.Serialize(file, config);
+    }
+
+    internal static void ApplyPayload(ZipArchive zip, string root)
+    {
+        LifecycleSafety.InspectTree(root);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Validate the whole archive and lock availability before replacing any existing file.
+        foreach (var entry in zip.Entries)
         {
-            using var key=Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\"+ServiceName);
-            if(key is null)return;
-            var info=new ProcessStartInfo("sc.exe"){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true};info.ArgumentList.Add("query");info.ArgumentList.Add(ServiceName);
-            using var p=Process.Start(info)!;var text=p.StandardOutput.ReadToEnd();p.WaitForExit();if(text.Contains("STOPPED",StringComparison.OrdinalIgnoreCase)||p.ExitCode==1060)return;Thread.Sleep(1000);
+            ValidateEntry(entry.FullName);
+            var dest = Path.GetFullPath(Path.Combine(root, entry.FullName));
+            if (!dest.StartsWith(Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !seen.Add(Path.TrimEndingDirectorySeparator(dest)))
+                throw new InvalidDataException("Duplicate or escaping payload path.");
+            CheckNoReparse(dest);
+            if (File.Exists(dest))
+            {
+                var timer = Stopwatch.StartNew();
+                while (true)
+                {
+                    try { using var probe = new FileStream(dest, FileMode.Open, FileAccess.ReadWrite, FileShare.None); break; }
+                    catch (IOException) when (timer.Elapsed < TimeSpan.FromSeconds(10)) { Thread.Sleep(200); }
+                }
+            }
         }
-        throw new TimeoutException("Service did not stop. Files were not replaced.");
+        foreach (var entry in zip.Entries)
+        {
+            var dest = Path.GetFullPath(Path.Combine(root, entry.FullName));
+            CheckNoReparse(dest);
+            if (IsDirectoryEntry(entry.FullName, entry.Name)) { Directory.CreateDirectory(dest); continue; }
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            var temporary = dest + ".setup-" + Guid.NewGuid().ToString("N");
+            try { entry.ExtractToFile(temporary); File.Move(temporary, dest, true); }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
     }
 }

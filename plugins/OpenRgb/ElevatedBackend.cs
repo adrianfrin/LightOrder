@@ -22,6 +22,7 @@ internal static class ElevatedBackend
             // An explicit UAC action starts only an existing driver. It never installs one.
             var startInfo = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "sc.exe")) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
             startInfo.ArgumentList.Add("start"); startInfo.ArgumentList.Add("PawnIO");
+            if (DevicePolicy.Detectors(settings).Any(d => d.Contains("SMBus", StringComparison.OrdinalIgnoreCase)))
             using (var driver = Process.Start(startInfo)!)
             {
                 var stdout = driver.StandardOutput.ReadToEndAsync(); var stderr = driver.StandardError.ReadToEndAsync();

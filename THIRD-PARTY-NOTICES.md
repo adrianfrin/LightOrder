@@ -18,6 +18,12 @@ LightOrder source is GPL-3.0-or-later. Components retain their own copyrights an
 
 License texts are in `third-party/licenses`. OpenRGB source includes build definitions and bundled third-party headers. Qt shared libraries remain separate and replaceable; installing replacement binaries requires administrator access because all executable service dependencies are protected from unprivileged modification. LightOrder does not prohibit reverse engineering for debugging modifications to LGPL components.
 
+## UI design inspiration / 界面设计灵感
+
+The interface draws design inspiration from [FlClash](https://github.com/chen08209/FlClash), a GPL-3.0 project. This credits visual/product design inspiration. It does not assert copied FlClash code or a bundled FlClash dependency; any future code reuse must retain its actual source and applicable license notices.
+
+界面设计参考 [FlClash](https://github.com/chen08209/FlClash)（GPL-3.0 项目）。此处致谢视觉与产品设计灵感，不表示复制代码或随包提供 FlClash 依赖；如后续复用代码，应按实际来源保留适用的许可证声明。
+
 ## 中文说明
 
 主板协议适配保留liquidctl的GPL来源声明。硬件监控库维持MPL许可，OpenRGB是独立的GPL引擎，Qt共享库保留LGPL等上游条款。驱动PawnIO保留GPL及其特殊例外条款。发布包中二进制不因进程隔离而免除源码/许可证义务。

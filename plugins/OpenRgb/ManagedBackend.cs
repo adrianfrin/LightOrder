@@ -5,6 +5,7 @@ using System.Net.NetworkInformation;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Runtime.InteropServices;
+using System.Text.Json.Serialization;
 using ControlCenter.Contracts;
 
 namespace ControlCenter.OpenRgb;
@@ -15,27 +16,42 @@ internal sealed record BackendSettings
     public string SourceConfigPath { get; init; } = Path.Combine(AppContext.BaseDirectory, "detectors.json");
     public string DataDirectory { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LightOrder", "OpenRgb");
     public int RequestTimeoutMs { get; init; } = 5000;
+    public bool EnableEneDram { get; init; } = true;
+    public DeviceRule[] AdditionalDevices { get; init; } = [];
+    internal static string SettingsPath(string baseDirectory) => Path.Combine(baseDirectory, "backend.json");
     public static (BackendSettings Settings, string Path) Load()
     {
-        var explicitPath = Environment.GetEnvironmentVariable("CONTROLCENTER_OPENRGB_SETTINGS");
-        var local = Path.Combine(AppContext.BaseDirectory, "backend.json");
-        var user = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "IndependentControlCenter", "OpenRgb", "backend.json");
-        var path = !string.IsNullOrWhiteSpace(explicitPath) ? Path.GetFullPath(explicitPath) : File.Exists(local) ? local : user;
-        if (!File.Exists(path) && !string.IsNullOrWhiteSpace(explicitPath)) throw new PluginException("ConfigurationError", $"Settings file does not exist: {path}");
-        BackendSettings settings;
+        // The service runs as SYSTEM. Never consult environment or per-user overrides.
+        var path = SettingsPath(AppContext.BaseDirectory);
+        ProtectedPaths.Require(path);
+        if (File.Exists(path) && new FileInfo(path).Length > 65536) throw new PluginException("ConfigurationError", "backend.json exceeds 64 KiB");
+        var settings = File.Exists(path) ? Parse(File.ReadAllText(path)) : new();
+        Validate(settings);
+        foreach (var item in new[] { settings.ExecutablePath, settings.SourceConfigPath, settings.DataDirectory }) ProtectedPaths.Require(item);
+        return (settings, path);
+    }
+    internal static BackendSettings Parse(string json)
+    {
+        if (System.Text.Encoding.UTF8.GetByteCount(json) > 65536) throw new PluginException("ConfigurationError", "backend.json exceeds 64 KiB");
         try
         {
-            if (File.Exists(path) && new FileInfo(path).Length > 65536) throw new PluginException("ConfigurationError", "backend.json exceeds 64 KiB");
-            settings = File.Exists(path) ? JsonSerializer.Deserialize<BackendSettings>(File.ReadAllText(path), Wire.Json) ?? throw new JsonException("Empty settings") : new();
+            var options = new JsonSerializerOptions(Wire.Json) { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
+            var settings = JsonSerializer.Deserialize<BackendSettings>(json, options) ?? throw new JsonException("Empty settings");
+            Validate(settings);
+            return settings;
         }
         catch (JsonException e) { throw new PluginException("ConfigurationError", $"Invalid backend.json: {e.Message}"); }
+    }
+    private static void Validate(BackendSettings settings)
+    {
         foreach (var item in new[] { settings.ExecutablePath, settings.SourceConfigPath, settings.DataDirectory })
-            if (string.IsNullOrWhiteSpace(item) || !Path.IsPathFullyQualified(item) || item.StartsWith("\\\\") || item.StartsWith("//"))
-                throw new PluginException("ConfigurationError", "OpenRGB paths must be absolute local paths");
+            if (string.IsNullOrWhiteSpace(item) || !Path.IsPathFullyQualified(item) || item.StartsWith("\\\\") || item.StartsWith("//")
+                || item.Length < 3 || item[1] != ':' || item.AsSpan(2).Contains(':'))
+                throw new PluginException("ConfigurationError", "OpenRGB paths must be absolute local drive paths without alternate streams");
         if (!Path.GetFileName(settings.ExecutablePath).Equals("OpenRGB.exe", StringComparison.OrdinalIgnoreCase))
             throw new PluginException("ConfigurationError", "Executable must be named OpenRGB.exe so duplicate-process checks remain effective");
         if (settings.RequestTimeoutMs is < 250 or > 30000) throw new PluginException("ConfigurationError", "requestTimeoutMs must be 250..30000");
-        return (settings, path);
+        DevicePolicy.Validate(settings);
     }
 }
 
@@ -65,13 +81,15 @@ internal sealed class ManagedBackend(BackendSettings settings) : IAsyncDisposabl
         if (!new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
             throw new PluginException("ElevationRequired", "内存后端必须以管理员权限启动；驱动运行或端口可连接不代表具有内存访问权限。");
         if (!File.Exists(settings.ExecutablePath)) throw new PluginException("BackendMissing", $"OpenRGB executable not found: {settings.ExecutablePath}");
-        var driver = PawnIoState();
-        if (driver != "running") throw new PluginException("DriverUnavailable", $"PawnIO is {driver}. Explicitly start the already-installed driver from an Administrator session before starting this backend. No driver was installed or started. {AdminHelp}");
+        var needsMemoryBus = DevicePolicy.Detectors(settings).Any(d => d.Contains("SMBus", StringComparison.OrdinalIgnoreCase));
+        var driver = needsMemoryBus ? PawnIoState() : "not-required";
+        if (needsMemoryBus && driver != "running") throw new PluginException("DriverUnavailable", $"PawnIO is {driver}. Explicitly start the already-installed driver from an Administrator session before starting this backend. No driver was installed or started. {AdminHelp}");
         if (IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(e => e.Port == Port))
             throw new PluginException("PortInUse", $"Port {Port} is already in use; no process was started");
         if (!File.Exists(settings.SourceConfigPath) || new FileInfo(settings.SourceConfigPath).Length > 4 * 1024 * 1024)
             throw new PluginException("ConfigurationError", "Source OpenRGB.json is missing or exceeds 4 MiB");
-        var clean = SanitizeConfig(await File.ReadAllTextAsync(settings.SourceConfigPath, token));
+        foreach (var path in new[] { settings.ExecutablePath, settings.SourceConfigPath, settings.DataDirectory }) ProtectedPaths.Require(path);
+        var clean = SanitizeConfig(await File.ReadAllTextAsync(settings.SourceConfigPath, token), settings);
         // Fresh directory prevents old profiles, plugins, shutdown actions or executable settings leaking in.
         ConfigDirectory = Path.Combine(settings.DataDirectory, "runs", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(ConfigDirectory);
@@ -107,14 +125,20 @@ internal sealed class ManagedBackend(BackendSettings settings) : IAsyncDisposabl
         finally { if (acquired) gate.ReleaseMutex(); }
         // No startup retry loop. The UI can call backend.status until detection finishes.
     }
-    internal static JsonObject SanitizeConfig(string source)
+    internal static JsonObject SanitizeConfig(string source, BackendSettings? settings = null)
     {
+        settings ??= new();
+        DevicePolicy.Validate(settings);
         JsonNode? root;
         try { root = JsonNode.Parse(source); } catch (JsonException e) { throw new PluginException("ConfigurationError", e.Message); }
-        if (root?["Detectors"]?["detectors"] is not JsonObject detectors || !detectors.ContainsKey("ENE SMBus DRAM"))
-            throw new PluginException("ConfigurationError", "Source config must contain the installed detector inventory including ENE SMBus DRAM");
+        if (root is not JsonObject obj || obj["Detectors"] is not JsonObject section || section["detectors"] is not JsonObject detectors
+            || !detectors.ContainsKey(DevicePolicy.MemoryDetector))
+            throw new PluginException("ConfigurationError", "Source config must contain the exact installed detector inventory including ENE SMBus DRAM");
+        var allowed = DevicePolicy.Detectors(settings).ToHashSet(StringComparer.Ordinal);
+        if (allowed.Any(name => !detectors.ContainsKey(name)))
+            throw new PluginException("ConfigurationError", "An explicitly allowed detector is absent from the installed inventory (names are case-sensitive)");
         var cleanDetectors = new JsonObject();
-        foreach (var entry in detectors) cleanDetectors[entry.Key] = entry.Key == "ENE SMBus DRAM";
+        foreach (var entry in detectors) cleanDetectors[entry.Key] = allowed.Contains(entry.Key);
         return new JsonObject
         {
             ["Detectors"] = new JsonObject { ["detectors"] = cleanDetectors, ["hid_safe_mode"] = true },
@@ -175,13 +199,9 @@ internal sealed class ManagedBackend(BackendSettings settings) : IAsyncDisposabl
         {
             try
             {
-                if (!owned.HasExited && !WritesMayBePending)
-                {
-                    // Only this exact Process object is eligible; never look up/kill external instances.
-                    owned.Kill(entireProcessTree: false);
-                    using var timeout = new CancellationTokenSource(3000);
-                    await owned.WaitForExitAsync(timeout.Token);
-                }
+                // All SDK scopes have ended before normal plugin disposal. Close only
+                // this retained Process, including after writes; never search by PID/name.
+                await OwnedProcessShutdown.CloseAsync(new OwnedProcess(owned), WritesMayBePending);
             }
             catch (Exception e) when (e is InvalidOperationException or Win32Exception or OperationCanceledException) { }
             finally { owned.Dispose(); owned = null; }

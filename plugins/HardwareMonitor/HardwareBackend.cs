@@ -10,6 +10,7 @@ sealed class HardwareBackend : IMonitorBackend
     private Dictionary<string, byte>? baseline;
     private ControllerLease? owner;
     private bool touched;
+    private readonly RestorationIntent intent = new(RestorationIntent.DefaultPath);
     public bool CanControl { get; private set; }
     public string Detail { get; private set; } = "Read-only hardware monitoring.";
 
@@ -31,7 +32,7 @@ sealed class HardwareBackend : IMonitorBackend
         try
         {
             CanControl = cpu is not null && radiator is not null && chassis is not null && FanSessionPolicy.ValidBaseline(FanSessionPolicy.ReadRegisters(computer.GetReport()));
-            Detail = CanControl ? "Validated radiator/case controls; pump read-only. Sessions stop and verify restoration after at most 30 minutes." : "Validated controls or baseline unavailable; read-only.";
+            Detail = CanControl ? "Validated radiator/case continuous control; pump read-only. Release and lifecycle errors restore and verify baseline registers." : "Validated controls or baseline unavailable; read-only.";
         }
         catch (Exception e) { Detail = "Baseline unavailable; read-only: " + e.Message; }
     }
@@ -87,6 +88,7 @@ sealed class HardwareBackend : IMonitorBackend
     public void BeginControl()
     {
         if (!CanControl) throw new InvalidOperationException("Fan control is unavailable.");
+        if (owner is not null) throw new InvalidOperationException("Control already acquired.");
         owner = new ControllerLease();
         try
         {
@@ -97,6 +99,10 @@ sealed class HardwareBackend : IMonitorBackend
     }
     public void Apply(float radiatorDuty, float caseDuty)
     {
+        if (owner is null || baseline is null) throw new InvalidOperationException("Control lease is required.");
+        if (!float.IsFinite(radiatorDuty) || radiatorDuty is < 40 or > 100 ||
+            !float.IsFinite(caseDuty) || caseDuty is < 25 or > 100) throw new ArgumentOutOfRangeException(nameof(radiatorDuty));
+        if (!touched) intent.Record(baseline); // Flush durable evidence BEFORE any manual write.
         touched = true; // A setter may change hardware before throwing.
         radiator!.SetSoftware(radiatorDuty);
         chassis!.SetSoftware(caseDuty);
@@ -104,16 +110,10 @@ sealed class HardwareBackend : IMonitorBackend
     public bool Restore()
     {
         if (!touched) { owner?.Dispose(); owner = null; return false; }
-        var failures = new List<string>();
-        try { radiator!.SetDefault(); } catch (Exception e) { failures.Add("radiator: " + e.Message); }
-        try { chassis!.SetDefault(); } catch (Exception e) { failures.Add("case: " + e.Message); }
-        try
-        {
-            var after = FanSessionPolicy.ReadRegisters(computer!.GetReport());
-            if (baseline is null || !FanSessionPolicy.Restored(baseline, after)) failures.Add("Bank 0 register readback differs from captured baseline.");
-        }
-        catch (Exception e) { failures.Add("Register verification: " + e.Message); }
-        if (failures.Count > 0) throw new InvalidOperationException(string.Join("; ", failures));
+        FanRestoration.RestoreVerified(() => radiator!.SetDefault(), () => chassis!.SetDefault(),
+            baseline ?? throw new InvalidOperationException("Captured baseline unavailable."),
+            () => FanSessionPolicy.ReadRegisters(computer!.GetReport()));
+        intent.ClearVerified();
         touched = false;
         owner?.Dispose(); owner = null;
         return true;

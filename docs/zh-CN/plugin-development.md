@@ -50,6 +50,7 @@ stdin/stdout每行一个JSON-RPC 2.0对象，stdout只放协议，诊断写stder
 |---|---|
 | lighting.static | color为#RRGGBB，brightness为0–1，operationId用于去重 |
 | lighting.off | operationId |
+| lighting.effect | `{effect:"breathing"或"rainbow",color:"#RRGGBB",brightness:0..1,periodSeconds?:2..60,operationId?,phaseUtc?}`；服务生成静态帧 |
 | fan.profile | 共享FanProfile：模式、独立百分比、冷排/机箱曲线节点 |
 | device.release | 空参数，经device.execute调用；仅实际支持时声明 |
 | power.windowsScheme | 已安装电源计划schemeId |
@@ -61,6 +62,24 @@ stdin/stdout每行一个JSON-RPC 2.0对象，stdout只放协议，诊断写stder
 `accepted`只表示命令发送，不表示实物验收。`applied`、`released`应在可回读场景带证据；部分失败必须明确报告。逐属性保存基线，释放时不要覆盖其它程序后来写入的设置。
 
 内部有限状态使用枚举；可扩展协议标识使用StandardMethods/StandardCapabilities集中定义。未知写能力拒绝执行，不映射到默认写操作。
+
+## 服务灯效与自动化
+
+`lighting.effect` 只接受区分大小写的 `breathing` 或 `rainbow`。调用方应为两者显式提供有效 `color` 与 `brightness`（彩虹自行生成色相）。解析器拒绝缺少 `color` 或 `brightness`。`periodSeconds` 默认 6，所有数字必须有限。可选 `phaseUtc` 在校验和执行时与服务时间相差均不得超过一天；自动化每次派发会替换相位和操作编号，使保存动作可重复使用；直接调用仍须提供新鲜相位。可选 `operationId` 最长 128 字符。静态/关闭使用各自能力，不是 `lighting.effect` 的取值。
+
+声明 `lighting.static` 的插件可使用服务标准灯效适配：发现结果增加 `lighting.effect`、effects 条目、`animationSource:"service"` 和 `animationFrameRate:4`。服务以每秒 4 帧为目标输出静态帧，最多 16 台设备；插件无需动画计时器。失败后停止该效果，不重试。静态、关闭或释放会替代该设备动画。正常关闭尝试最终静态设置再释放。这些是命令状态，不是物理回读。
+
+新适配器应保留稳定身份，只声明实际能力。服务只路由到发现设备的插件及其声明能力（或明确的静态转动画适配）。界面与自动化共用标准 DeviceCommand；不支持的能力不会自动生成控件。[自动化](automation.md)保存声明式动作列表，先持久化预留，不执行任意脚本。
+
+## OpenRGB 设备策略
+
+`plugins/OpenRgb/backend.json` 支持 `enableEneDram`（默认 true）和 `additionalDevices`（默认空）。每条扩展规则必须填写准确的已安装 `detector`、SDK `type`、准确 `name`，以及 `location` 或 `serial` 至少一项。可选 `vendor`、`description` 进一步限制身份。字符串区分大小写，禁止通配符和控制字符，最多 128 条。检测器名称授权探测，SDK 身份规则授权后续控制；启用检测器不代表允许其发现的所有设备。
+
+类型遵循 OpenRGB：0 主板、1 内存、2 显卡、3 散热器、4 灯带、5 键盘、6 鼠标、7 鼠标垫、8 耳机、9 耳机架、10 手柄、11 灯、12 音箱、14 存储、15 机箱、16 麦克风、17 配件、18 小键盘、19 笔记本、20 显示器。未知类型与虚拟设备拒绝。以键盘为例，使用 `type:5`，其余检测器、名称、位置或序列号必须来自该可信后端的准确发现结果，不能猜测或照抄示例身份。
+
+完整检测器清单必须匹配 OpenRGB 程序，且包含全部选中检测器。当前校验即使在 `enableEneDram:false` 时也要求存在 `ENE SMBus DRAM` 条目；未选中时该条目被关闭。清单内其他未选中检测器也被关闭。适配器不会独立验证清单是否完整或是否匹配程序，管理员必须提供匹配清单。HID 安全模式保持开启，ENE 持久保存关闭。默认 ENE ID 保持兼容，其他 ID 根据类型/位置/名称/序列号生成。重复或不完整身份标记为歧义，不能写入；写入前复核身份和布局。允许列表内的设备还必须具有受支持的 Direct/Static 逐 LED 模式及至少一颗 LED，适配器才声明静态/关闭能力；加入列表本身不会使设备可写。这提供受限的实物设备适配，不保证全部 OpenRGB 硬件兼容。
+
+源码：[设备策略](../../plugins/OpenRgb/DevicePolicy.cs)、[后端设置](../../plugins/OpenRgb/ManagedBackend.cs)、[OpenRGB 适配器](../../plugins/OpenRgb/OpenRgbPlugin.cs)、[服务灯效](../../src/LightOrder.Service/LightingEffects.cs)、[能力标识](../../src/ControlCenter.Contracts/StandardCapabilities.cs)。另见[安装配置](getting-started.md#openrgb-与-pawnio)和[证据矩阵](hardware-support.md)。
 
 ## 开发与验证
 
