@@ -36,7 +36,7 @@ static class ServiceMonitorSelfTests
                 await Reject(monitor, Command(profile: FanProfile.Silent with { RadiatorPercent = 0 }), "InvalidArgument");
                 Check(backend.Writes == 0, "invalid profile no write");
                 await Apply(monitor);
-                Check(backend.Writes == 1 && backend.LastRadiator == 100 && backend.LastCase == 100, "conservative startup");
+                Check(backend.Writes == 1 && backend.LastRadiator == 40 && backend.LastCase == 25, "fresh low-temperature startup without full-speed burst");
                 var started = (await Metadata(monitor)).GetProperty("session").GetProperty("startedUtc").GetString();
                 for (var i = 0; i < 3605; i++)
                 {
@@ -62,7 +62,7 @@ static class ServiceMonitorSelfTests
                 var before = backend.Events.Count;
                 await monitor.PollOnceAsync();
                 Check(backend.Events.Skip(before).SequenceEqual(new[] { "restore", "sample", "begin", "apply" }), "gap restores before new sampling and writes");
-                Check(backend.LastRadiator == 100 && backend.LastCase == 100 && backend.Begins == 2, "resume conservative temperature even for manual profile");
+                Check(backend.LastRadiator == 73 && backend.LastCase == 47 && backend.Begins == 2, "resume starts from freshly validated real temperature");
                 var release = (ApplyResult)await monitor.HandleAsync("device.execute", Wire.Element(Command("device.release")), default);
                 Check(release.Status == "released" && backend.Restores == 2 && Wire.Element(release.Readback).GetProperty("restorationVerified").GetBoolean(), "explicit release verified");
                 var writes = backend.Writes;
@@ -103,7 +103,7 @@ static class ServiceMonitorSelfTests
                 Check(slow.Restores == 1 && slow.Writes == 1, "suspend during sensor read prevents write");
                 slow.OnSample = null;
                 await m.PollOnceAsync();
-                Check(slow.Begins == 2 && slow.LastRadiator == 100, "fresh cycle resumes after slow read");
+                Check(slow.Begins == 2 && slow.LastRadiator == 40, "fresh cycle resumes without synthetic temperature");
             }
             var power = new FakeBackend(new FakeTime());
             await using (var m = new ServiceMonitor(power, power.Clock, false))
@@ -116,7 +116,7 @@ static class ServiceMonitorSelfTests
                 await Reject(m, Command(), "ReadOnly");
                 m.HandlePowerTransition(false);
                 await m.PollOnceAsync();
-                Check(power.Begins == 2 && power.LastRadiator == 100, "resume notification requires fresh conservative restart");
+                Check(power.Begins == 2 && power.LastRadiator == 40, "resume notification uses fresh real temperature");
                 m.HandlePowerTransition(false);
                 Check(power.Restores == 2, "resume without suspend still restores");
             }
@@ -277,6 +277,7 @@ static class ServiceMonitorSelfTests
             noDacl.SetSecurityDescriptorSddlForm("O:BAG:BAD:NO_ACCESS_CONTROL");
             try { ProtectedIntentPath.ValidateAcl(noDacl, false); throw new Exception("null DACL accepted"); }
             catch (UnauthorizedAccessException) { count++; }
+            count += FanControllerTests.Run();
             Console.WriteLine($"Service monitor self-test: {count} assertions passed; no hardware accessed.");
             return 0;
         }

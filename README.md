@@ -15,12 +15,12 @@ Download the Windows x64 **`LightOrder-win-x64.exe`** installer from [Releases](
 - First setup requests administrator approval to install the service and plugins. Daily desktop operations then run without per-action UAC prompts. Installation, repair, updates, and removal can require elevation.
 - ENE memory lighting needs compatible OpenRGB and PawnIO. Bundling depends on the release; see [dependencies and setup](docs/en/getting-started.md).
 
-One download installs multiple files under `%ProgramFiles%\LightOrder`. The installed launcher is `LightOrder.exe`.
+One download installs multiple files under `%ProgramFiles%\LightOrder` and creates desktop and Start menu shortcuts. Remove it through Windows Installed apps; double-click a newly downloaded installer to update. The installed launcher is `LightOrder.exe`.
 
 ## What it does
 
 - **Lighting:** static, breathing, rainbow, brightness, and off on eligible devices. Explicit sync groups preserve known independent settings. Saved scenes can be reused in rules.
-- **Cooling:** continuous radiator/case curves or manual duty with thermal protection, live temperature/RPM history, and explicit restoration. Writes remain limited to the allowlisted board and channels.
+- **Cooling:** Silent fixes radiator/case duty at 40%/25%; Balanced filters temperature with hysteresis and bounded speed changes. Custom curves remain editable. Every mode retains immediate full-duty protection at 80°C, live temperature/RPM history, and explicit restoration. Writes remain limited to the allowlisted board and channels.
 - **Automation:** exact local-minute schedules and exact-process triggers combine lighting scenes, cooling presets, power schemes, and supported process policies. The service executes rules with durable at-most-once dispatch and visible pause states. See [automation](docs/en/automation.md).
 - **My computer:** read-only component information, Windows power schemes, and supported process priority/affinity controls.
 - **Local service:** protected installation, account-restricted named pipe, process-isolated plugins, and operation diagnostics. Closing the window hides it to the tray; exiting the UI leaves the service active.
@@ -62,7 +62,7 @@ Native Windows App captures from the 0.2 implementation, connected to the local 
 
 **Production cooling now runs continuously until release, shutdown, or a safety fault.** Radiator duty has a 40% floor; case duty has a 25% floor; both reach 100% at 80°C. Pump control is read-only. No firmware or persistent device-profile writes are supported.
 
-Suspend notifications and control gaps trigger restoration before conservative restart with fresh telemetry. A durable restoration intent blocks unsafe takeover after unresolved writes. Hard process termination, OS crashes, power loss, and driver failure cannot guarantee restoration. Long-duration and sleep/resume hardware testing of the new implementation remains pending. Lighting command acceptance or a matching OpenRGB cache does not prove physical output. See the [support and evidence matrix](docs/en/hardware-support.md) and [cooling guide](docs/en/cooling.md).
+Suspend notifications and control gaps trigger restoration before restarting from fresh actual telemetry. A durable restoration intent blocks unsafe takeover after unresolved writes. Hard process termination, OS crashes, power loss, and driver failure cannot guarantee restoration. Long-duration and sleep/resume hardware testing of the new implementation remains pending. Lighting command acceptance or a matching OpenRGB cache does not prove physical output. See the [support and evidence matrix](docs/en/hardware-support.md) and [cooling guide](docs/en/cooling.md).
 
 ## Build from source
 

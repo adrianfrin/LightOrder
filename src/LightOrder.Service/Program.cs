@@ -48,7 +48,8 @@ public sealed class ServiceWorker(ServiceSettings settings, ILogger<ServiceWorke
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await using var runtime = new ServiceRuntime(new ProfileStore(ServiceSettings.StateDirectory));
+        var runtime = new ServiceRuntime(new ProfileStore(ServiceSettings.StateDirectory));
+        Exception? failure = null;
         // Keep the exclusive endpoint reserved until restoration and worker cleanup finish.
         NamedPipeServerStream? pipe = null;
         try
@@ -59,35 +60,92 @@ public sealed class ServiceWorker(ServiceSettings settings, ILogger<ServiceWorke
                 runtime.ExecuteAutomatedAsync, runtime.ValidateCommand, new WindowsAutomationProcessSource(settings.OwnerSid)));
             runtime.StartControlLoop(stoppingToken);
             logger.LogInformation("LightOrder service ready on {Pipe}. Protocol major {Version}.", ServiceSecurity.PipeName, Wire.Version);
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                await pipe.WaitForConnectionAsync(stoppingToken);
-                try { await ServeClientAsync(pipe, runtime, stoppingToken); }
-                catch (Exception e) when (e is IOException or OperationCanceledException or System.Text.DecoderFallbackException or InvalidDataException)
-                {
-                    // Peer disconnect and malformed framing are connection-local failures.
-                    runtime.AddDiagnostic("Client connection closed: " + e.GetType().Name + ".");
-                }
-                finally { if (pipe.IsConnected) pipe.Disconnect(); }
-            }
+            await RunConnectionsAsync(pipe, client => ServeClientAsync(client, runtime, stoppingToken),
+                runtime.AddDiagnostic, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         catch (Exception e)
         {
+            failure = e;
             Environment.ExitCode = 1;
-            logger.LogError("Service stopped after {Category}; check protected deployment configuration.", e.GetType().Name);
+            logger.LogError("Service stopped; check protected deployment configuration. {Details}", SafeExceptionDetails(e));
             throw;
         }
         finally
         {
             try { await runtime.DisposeAsync(); }
+            catch (Exception cleanupError)
+            {
+                logger.LogError("Service cleanup failed. {Details}", SafeExceptionDetails(cleanupError));
+                // Preserve the original host failure if cleanup also fails.
+                if (failure is null) throw;
+            }
             finally { pipe?.Dispose(); }
             foreach (var diagnostic in runtime.Diagnostics) logger.LogInformation("{Diagnostic}", diagnostic);
             logger.LogInformation("Plugin release and process cleanup completed. Hard crashes cannot guarantee device restoration.");
         }
     }
 
-    private static async Task ServeClientAsync(NamedPipeServerStream pipe, ServiceRuntime runtime, CancellationToken stoppingToken)
+    // Reuse the same reserved server instance; creation/ACL and non-peer listener errors remain fatal.
+    internal static async Task RunConnectionsAsync(NamedPipeServerStream pipe,
+        Func<NamedPipeServerStream, Task> serveClient, Action<string> diagnostic, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var resetConnection = false;
+            try
+            {
+                try { await pipe.WaitForConnectionAsync(token); }
+                catch (IOException error) when (IsPeerDisconnect(error))
+                {
+                    resetConnection = true;
+                    diagnostic("Client disconnected while accepting: " + SafeExceptionDetails(error));
+                    continue;
+                }
+                resetConnection = true;
+                try { await serveClient(pipe); }
+                catch (Exception error) when (error is IOException or OperationCanceledException or
+                    System.Text.DecoderFallbackException or InvalidDataException)
+                {
+                    diagnostic("Client connection closed: " + SafeExceptionDetails(error));
+                }
+            }
+            finally
+            {
+                // IsConnected is cached state and may already be false after a failed read/write.
+                // Disconnect must still reset that instance before the next accept.
+                if (resetConnection) DisconnectClient(pipe, diagnostic);
+            }
+        }
+    }
+
+    internal static void DisconnectClient(NamedPipeServerStream pipe, Action<string> diagnostic)
+    {
+        try { pipe.Disconnect(); }
+        catch (IOException error) when (IsPeerDisconnect(error))
+        {
+            diagnostic("Client disconnected during reset: " + SafeExceptionDetails(error));
+        }
+    }
+
+    private static bool IsPeerDisconnect(IOException error) => (error.HResult & 0xffff) is 109 or 232 or 233;
+
+    // Exception messages/Data can contain arbitrary request or plugin text. Retain safe debugging
+    // details, including the inner cause and call sites, without publishing those values.
+    internal static string SafeExceptionDetails(Exception error)
+    {
+        var details = new System.Text.StringBuilder();
+        for (Exception? cause = error; cause is not null; cause = cause.InnerException)
+        {
+            if (details.Length > 0) details.Append(" -> ");
+            details.Append(cause.GetType().FullName).Append(" HResult=0x").Append(cause.HResult.ToString("X8"));
+            if (cause is System.ComponentModel.Win32Exception native) details.Append(" NativeError=").Append(native.NativeErrorCode);
+            details.AppendLine().Append(cause.StackTrace);
+        }
+        return details.ToString();
+    }
+
+    internal static async Task ServeClientAsync(NamedPipeServerStream pipe, ServiceRuntime runtime, CancellationToken stoppingToken)
     {
         var framing = new RpcFraming(pipe);
         // Prevent idle clients from monopolizing the single serial command endpoint indefinitely.

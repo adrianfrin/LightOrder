@@ -107,7 +107,8 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
     private readonly DeviceRouter router = new();
     private readonly Queue<string> diagnostics = new();
     private bool stopping;
-    private bool disposed;
+    private readonly object lifetimeLock = new();
+    private Task? disposeTask;
     private readonly LightingEffects effects = new();
     private AutomationEngine? automation;
     private CancellationTokenSource? controlLifetime;
@@ -155,9 +156,13 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
 
     public void StartControlLoop(CancellationToken token)
     {
-        if (controlLoop is not null) throw new InvalidOperationException("Control loop already started.");
-        controlLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
-        controlLoop = RunControlLoopAsync(controlLifetime.Token);
+        lock (lifetimeLock)
+        {
+            if (disposeTask is not null) throw new ObjectDisposedException(nameof(ServiceRuntime));
+            if (controlLoop is not null) throw new InvalidOperationException("Control loop already started.");
+            controlLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+            controlLoop = RunControlLoopAsync(controlLifetime.Token);
+        }
     }
 
     private async Task RunControlLoopAsync(CancellationToken token)
@@ -435,21 +440,33 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
         ? new PluginException(p.Code, p.Code == "TimeoutOutcomeUnknown" ? "Plugin timed out. Outcome unknown; no retry. Check the device before restarting the service." : "Plugin rejected the request: " + p.Code)
         : new PluginException("PluginUnavailable", "Plugin communication failed. Outcome may be unknown; no retry. Refresh the device list.");
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (controlLifetime is not null) await controlLifetime.CancelAsync();
+        lock (lifetimeLock)
+            return new ValueTask(disposeTask ??= DisposeCoreAsync());
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        // Publish the shared task before cancellation callbacks or plugin cleanup can run.
+        await Task.Yield();
+        if (controlLifetime is not null)
+        {
+            try { await controlLifetime.CancelAsync(); }
+            catch (Exception error) { AddDiagnostic("Control cancellation failed: " + Category(error) + ". Continuing restoration."); }
+        }
         if (controlLoop is not null)
         {
             try { await controlLoop; }
             catch (Exception error) { AddDiagnostic("Control loop stopped: " + Category(error) + ". Continuing restoration."); }
         }
+        // Never hold gate while waiting for the control loop: it may itself be waiting for gate.
+        controlLifetime?.Dispose();
         await gate.WaitAsync();
         try
         {
-            if (disposed) return;
             stopping = true;
             await effects.FinishAsync(command => ExecutePluginAsync(command, 0), AddDiagnostic);
-            controlLifetime?.Dispose();
             // Release every worker even after an earlier worker fails. No automatic command replay.
             foreach (var plugin in plugins.AsEnumerable().Reverse())
             {
@@ -467,7 +484,6 @@ public sealed class ServiceRuntime(ProfileStore profiles) : IAsyncDisposable
             }
             router.Clear();
             plugins.Clear();
-            disposed = true;
         }
         finally { gate.Release(); }
     }

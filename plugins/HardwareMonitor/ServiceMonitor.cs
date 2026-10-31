@@ -19,7 +19,8 @@ sealed class ServiceMonitor : IAsyncDisposable
     private readonly TimeProvider time;
     private long lastCycleTimestamp, controlStartTimestamp;
     private DateTimeOffset? startedUtc;
-    private float previousTemperature = 100;
+    private readonly FanController controller = new();
+    private long lastControlTimestamp;
     private long samples;
     private MonitorState state = MonitorState.Idle;
     private string detail = "Monitor has not been opened.";
@@ -66,7 +67,7 @@ sealed class ServiceMonitor : IAsyncDisposable
                     if (!Active)
                     {
                         state = MonitorState.Resuming;
-                        previousTemperature = 100;
+                        controller.Reset();
                         samples = 0;
                         startedUtc = time.GetUtcNow();
                         lastCycleTimestamp = time.GetTimestamp();
@@ -151,7 +152,7 @@ sealed class ServiceMonitor : IAsyncDisposable
             {
                 // Resume may arrive without a suspend notification.
                 if (needsRestore) ResumeAfterGap();
-                previousTemperature = 100;
+                controller.Reset();
                 lastCycleTimestamp = time.GetTimestamp();
             }
         }
@@ -164,9 +165,9 @@ sealed class ServiceMonitor : IAsyncDisposable
         var result = Release("monotonic-time-gap");
         if (result.Status == "failed") throw new InvalidOperationException(detail);
         state = MonitorState.Resuming;
-        previousTemperature = 100;
+        controller.Reset();
         telemetry = [];
-        detail = "Control gap detected; defaults restored. Waiting for fresh telemetry before conservative restart.";
+        detail = "Control gap detected; defaults restored. Waiting for fresh telemetry before restart.";
     }
 
     private void SampleAndControl(CancellationToken cancellationToken)
@@ -214,10 +215,11 @@ sealed class ServiceMonitor : IAsyncDisposable
             lastCycleTimestamp = time.GetTimestamp();
             return;
         }
-        previousTemperature = Math.Max(raw!.Value, previousTemperature - 2);
-        var duties = profile.Evaluate(previousTemperature);
+        var duties = controller.Next(profile, raw!.Value, state == MonitorState.Resuming
+            ? TimeSpan.Zero : time.GetElapsedTime(lastControlTimestamp));
         cancellationToken.ThrowIfCancellationRequested();
         backend.Apply(duties.Radiator, duties.Case);
+        lastControlTimestamp = time.GetTimestamp();
         // Cancellation arriving during synchronous hardware I/O must still restore.
         cancellationToken.ThrowIfCancellationRequested();
         if (time.GetElapsedTime(sampleStarted) > MaximumControlGap)
@@ -254,6 +256,11 @@ sealed class ServiceMonitor : IAsyncDisposable
             profile, session = Session(), sessionLimitSeconds = (int?)null, controlMode = "continuous",
             crashRecoveryGuaranteed = false, telemetryLimitSamples = TelemetryLimit, pollIntervalSeconds = 1,
             maximumControlGapSeconds = MaximumControlGap.TotalSeconds, maximumTelemetryAgeSeconds = MaximumTelemetryAge.TotalSeconds,
+            regulation = controller.Status,
+            regulationPolicy = new { filterSeconds = FanController.FilterSeconds, temperatureDeadband = FanController.TemperatureDeadband,
+                risePercentPerSecond = FanController.RisePercentPerSecond, fallPercentPerSecond = FanController.FallPercentPerSecond,
+                emergencyTemperature = FanController.EmergencyTemperature, recoveryTemperature = FanController.RecoveryTemperature,
+                recoverySeconds = FanController.RecoverySeconds, riseHoldSeconds = FanController.RiseHoldSeconds },
             parameterSchema = new { capability = StandardCapabilities.FanProfile, model = "FanProfile", modes = new[] { "manual", "curve" },
                 curveMinPoints = 2, curveMaxPoints = 12, terminalTemperature = 80, terminalDuty = 100 }
         }))];

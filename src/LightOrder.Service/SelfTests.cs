@@ -1,3 +1,4 @@
+using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -6,7 +7,7 @@ using ControlCenter.Contracts;
 
 namespace LightOrder.Service;
 
-/// <summary>Pure and in-memory checks. Never starts a worker, opens the public pipe or touches hardware/configuration.</summary>
+/// <summary>Hardware-free checks, including private randomly named pipes. Never opens the public pipe or starts a plugin process.</summary>
 public static class SelfTests
 {
     public static async Task<int> RunAsync()
@@ -167,11 +168,123 @@ public static class SelfTests
                 Check(saved.GetProperty("status")[0].GetProperty("ruleId").GetString() == "evening", "automation rule status matches public ID contract");
             }
             await CheckSessionSnapshotsAsync(descriptor, Check);
+            await CheckConcurrentDisposalAsync(descriptor, Check);
+            await CheckPrivatePipeLifecycleAsync(Check);
             count += await LightingEffectTests.RunAsync();
             Console.WriteLine($"PASS {count} hardware-free service checks. No service, public pipe or hardware was started.");
             return 0;
         }
         catch (Exception e) { Console.Error.WriteLine(e); return 1; }
+    }
+
+    private static async Task CheckConcurrentDisposalAsync(PluginDescriptor descriptor, Action<bool, string> check)
+    {
+        var releaseEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var plugin = new FakePlugin(descriptor with { Id = "test.dispose" })
+        {
+            ReleaseEntered = releaseEntered,
+            AllowRelease = allowRelease.Task
+        };
+        await using var runtime = new ServiceRuntime(new ProfileStore("unused-test-path"));
+        runtime.AddTestPlugin(plugin);
+        runtime.StartControlLoop(default);
+        var first = runtime.DisposeAsync().AsTask();
+        try
+        {
+            await releaseEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var disposals = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => Task.Run(() =>
+            {
+                var task = runtime.DisposeAsync().AsTask();
+                return (Task: task, Waiting: !task.IsCompleted);
+            })));
+            check(!first.IsCompleted && disposals.All(result => result.Waiting && ReferenceEquals(first, result.Task)),
+                "concurrent disposers wait for the same in-flight release");
+            var shared = runtime.DisposeAsync().AsTask();
+            check(ReferenceEquals(first, shared), "repeat disposal returns the same cleanup task");
+            allowRelease.TrySetResult();
+            await Task.WhenAll(disposals.Select(result => result.Task).Append(first)).WaitAsync(TimeSpan.FromSeconds(10));
+            await runtime.DisposeAsync();
+            check(plugin.ReleaseCount == 1 && plugin.DisposeCount == 1, "running control loop and concurrent repeat disposal release/dispose plugin once");
+            var restartRejected = false;
+            try { runtime.StartControlLoop(default); } catch (ObjectDisposedException) { restartRejected = true; }
+            check(restartRejected, "control loop cannot start after disposal");
+        }
+        finally { allowRelease.TrySetResult(); }
+    }
+
+    private static async Task CheckPrivatePipeLifecycleAsync(Action<bool, string> check)
+    {
+        var pipeName = "LightOrder.SelfTest." + Guid.NewGuid().ToString("N");
+        using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, 65536, 65536);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+        using var finished = new SemaphoreSlim(0);
+        await using var runtime = new ServiceRuntime(new ProfileStore("unused-test-path"));
+        var diagnostics = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var served = 0;
+        var peerAlreadyClosed = 0;
+        var abruptClientClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = ServiceWorker.RunConnectionsAsync(pipe, async client =>
+        {
+            try
+            {
+                // Force a complete request's client to close before the server can write its response.
+                if (Volatile.Read(ref served) == 2) await abruptClientClosed.Task.WaitAsync(stop.Token);
+                await ServiceWorker.ServeClientAsync(client, runtime, stop.Token);
+            }
+            finally
+            {
+                if (!client.IsConnected) Interlocked.Increment(ref peerAlreadyClosed);
+                Interlocked.Increment(ref served);
+                finished.Release();
+            }
+        }, diagnostics.Enqueue, stop.Token);
+        try
+        {
+            // Every next client must be accepted after the prior client has closed its stream.
+            for (var index = 0; index < 10; index++)
+            {
+                using (var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous))
+                {
+                    await client.ConnectAsync(timeout.Token);
+                    if (index % 3 == 1)
+                        await client.WriteAsync(Encoding.UTF8.GetBytes("{\"jsonrpc\":\"2.0\""), timeout.Token); // truncated frame
+                    else
+                    {
+                        await client.WriteAsync(Encoding.UTF8.GetBytes($"{{\"jsonrpc\":\"2.0\",\"id\":{index},\"method\":\"app.plugins\"}}\n"), timeout.Token);
+                        if (index % 3 == 0)
+                        {
+                            var response = await new RpcFraming(client).ReadAsync(timeout.Token);
+                            using var document = response is null ? null : JsonDocument.Parse(response);
+                            check(document?.RootElement.GetProperty("id").GetInt32() == index,
+                                "private pipe response before normal close " + index);
+                        }
+                        // Other iterations close immediately after sending, before reading a response.
+                    }
+                }
+                if (index == 2) abruptClientClosed.TrySetResult();
+                await finished.WaitAsync(timeout.Token);
+                check(!server.IsCompleted, "private pipe listener survives closed client " + index);
+            }
+            check(served == 10 && peerAlreadyClosed > 0, "actual broken pipe state reset before accepting next client");
+            check(diagnostics.Any(text => text.Contains(nameof(EndOfStreamException))), "partial frame close stays connection-local");
+        }
+        finally
+        {
+            stop.Cancel();
+            try { await server.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        }
+        pipe.Dispose();
+        var listenerFailurePropagated = false;
+        try { await ServiceWorker.RunConnectionsAsync(pipe, _ => Task.CompletedTask, _ => { }, default); }
+        catch (ObjectDisposedException) { listenerFailurePropagated = true; }
+        check(listenerFailurePropagated, "listener lifetime errors remain fatal instead of retrying");
+        var safe = ServiceWorker.SafeExceptionDetails(new IOException("SECRET_REQUEST", new InvalidOperationException("SECRET_INNER")));
+        check(safe.Contains(nameof(IOException)) && safe.Contains(nameof(InvalidOperationException)) && safe.Contains("HResult=0x") &&
+            !safe.Contains("SECRET"), "failure details retain exception chain and native code without arbitrary messages");
     }
 
     private static async Task CheckSessionSnapshotsAsync(PluginDescriptor descriptor, Action<bool, string> check)
@@ -307,6 +420,10 @@ public static class SelfTests
         public int ExecuteCount { get; private set; }
         public bool Released { get; private set; }
         public bool Disposed { get; private set; }
+        public int ReleaseCount { get; private set; }
+        public int DisposeCount { get; private set; }
+        public TaskCompletionSource? ReleaseEntered { get; init; }
+        public Task? AllowRelease { get; init; }
         public async Task<JsonElement> CallAsync(string method, object parameters)
         {
             if (method == StandardMethods.Discover)
@@ -324,6 +441,9 @@ public static class SelfTests
             if (method == StandardMethods.Release)
             {
                 Released = true;
+                ReleaseCount++;
+                ReleaseEntered?.TrySetResult();
+                if (AllowRelease is not null) await AllowRelease;
                 if (FailRelease) throw new IOException("Simulated release failure");
                 return Wire.Element(new ApplyResult("restored", "Verified fake restoration"));
             }
@@ -344,6 +464,6 @@ public static class SelfTests
             }
             throw new InvalidOperationException("Unexpected fake method");
         }
-        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync() { Disposed = true; DisposeCount++; return ValueTask.CompletedTask; }
     }
 }

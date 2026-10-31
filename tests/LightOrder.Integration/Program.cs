@@ -4,6 +4,7 @@ using LightOrder.App;
 
 if (args is ["wait-probe"]) { await Task.Delay(TimeSpan.FromSeconds(60)); return; }
 if (args is ["verify-live", var directory]) { await LiveVerification.RunAsync(directory); return; }
+if (args is ["verify-fans", var fanDirectory]) { await FanVerification.RunAsync(fanDirectory); return; }
 var client = new PipeClient();
 var options = args.ToList();
 var output = options.Count > 1 ? options[1] : Path.Combine(Environment.CurrentDirectory, "artifacts", "integration-snapshot.json");

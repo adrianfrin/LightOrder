@@ -3,7 +3,7 @@ namespace ControlCenter.Contracts;
 public sealed record FanPoint(float Temperature, float Duty);
 public sealed record FanProfile(string Mode, float RadiatorPercent, float CasePercent, FanPoint[] RadiatorCurve, FanPoint[] CaseCurve)
 {
-    public static FanProfile Silent => new("curve", 40, 25,
+    public static FanProfile Silent => new("manual", 40, 25,
         [new(40,40), new(55,40), new(65,60), new(80,100)],
         [new(40,25), new(55,30), new(65,55), new(80,100)]);
     public void Validate()
@@ -33,8 +33,8 @@ public sealed record FanProfile(string Mode, float RadiatorPercent, float CasePe
     {
         Validate();
         if (!float.IsFinite(temperature) || temperature < 0 || temperature > 110) throw new ArgumentException("CPU温度无效");
-        // Manual requests retain an independent thermal floor; never pin low speed at high temperature.
-        float safety = Math.Clamp((temperature-60)*5,0,100);
+        // Fixed duty remains fixed below the independent emergency threshold.
+        float safety = temperature >= 80 ? 100 : 0;
         var requested = ProtocolValues.ParseFanMode(Mode) switch
         {
             FanControlMode.Manual => (RadiatorPercent, CasePercent),

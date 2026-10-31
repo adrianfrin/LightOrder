@@ -45,9 +45,13 @@ internal static partial class Program
                 return BeginOperation("uninstall", choice == DialogResult.Yes ? "keep" : "delete");
             }
             var app = Path.Combine(InstallRoot, "LightOrder.App.exe");
-            if (args.Length == 0 && File.Exists(app)) { Process.Start(new ProcessStartInfo(app) { UseShellExecute = true }); return 0; }
+            if (args.Length == 0 && File.Exists(app) && LifecycleSafety.SamePath(Environment.ProcessPath!, Path.Combine(InstallRoot, "LightOrder.exe")))
+            { Process.Start(new ProcessStartInfo(app) { UseShellExecute = true }); return 0; }
             if (args.Length > 0 && args is not ["--install"]) throw new ArgumentException("Unknown setup option.");
-            if (MessageBox.Show("首次配置将安装本地硬件服务和设备插件。之后日常使用无需重复管理员授权。\n\nFirst setup installs a local hardware service and plugins. Normal use does not require repeated elevation.\n\n继续 / Continue?", "光序 LightOrder", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return 0;
+            var message = File.Exists(app)
+                ? "更新光序及本地硬件服务，保留现有配置。安装后可从桌面或开始菜单打开。\n\nUpdate LightOrder and its hardware service, keeping your settings. Launch from the desktop or Start menu."
+                : "安装光序、本地硬件服务和插件，并创建桌面及开始菜单快捷方式。之后日常使用无需重复管理员授权。\n\nInstall LightOrder, its hardware service and plugins, with desktop and Start menu shortcuts. Normal use does not require repeated elevation.";
+            if (MessageBox.Show(message + "\n\n继续 / Continue?", "光序 LightOrder", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return 0;
             return BeginOperation("install", "keep");
         }
         catch (Exception e)
@@ -122,6 +126,9 @@ internal static partial class Program
         uninstall.SetValue("DisplayName", "LightOrder / 光序"); uninstall.SetValue("DisplayVersion", "0.2.0");
         uninstall.SetValue("Publisher", "LightOrder contributors"); uninstall.SetValue("InstallLocation", InstallRoot);
         uninstall.SetValue("UninstallString", '"' + bootstrap + "\" --uninstall");
+        uninstall.SetValue("DisplayIcon", Path.Combine(InstallRoot, "LightOrder.App.exe") + ",0");
+        uninstall.SetValue("NoModify", 1); uninstall.SetValue("NoRepair", 1);
+        InstallShortcuts();
     }
     private static void VerifyServiceReady()
     {

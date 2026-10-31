@@ -7,6 +7,7 @@
 1. Use Windows 11 x64 and install [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Setup checks for it; it does not silently download it.
 2. Download `LightOrder-win-x64.exe` from [Releases](https://github.com/adrianfrin/LightOrder/releases). Read that release's dependencies, verification notes, and SHA-256 hash.
 3. Run setup from your ordinary Windows account and approve administrator access. A protected worker installs `LightOrder.Service`, plugins, and the app. It then tries to launch the app with that account's existing unelevated Explorer token. If this is unavailable, setup reports completion and asks you to reopen LightOrder.
+   Setup creates desktop and Start menu shortcuts pointing directly to the ordinary-user app, and registers an entry in Windows Installed apps.
 4. Check the service connection in Settings. Discovery reads devices. **Restore lighting on startup** and **Restore cooling on startup** are separate opt-ins, both false by default. Enabled restoration requests saved settings only for eligible discovered devices, without retrying failures. Pending incomplete lighting operations suppress startup lighting restoration.
 5. Review each device's available controls before applying a change. OpenRGB discovery may start the configured backend, but does not itself set an effect.
 
@@ -22,11 +23,11 @@ Use the save menu to create a scene for reuse or automation. A partial failure r
 
 ## Cooling
 
-Only devices advertising `fan.profile` offer editing. Select radiator or case, choose a curve or manual percentage, then save/apply. Curves need 2–12 points, increasing temperature, nondecreasing duty, and an 80°C / 100% endpoint. Minimum duty is 40% radiator and 25% case. Manual mode retains thermal protection. Pump RPM is read-only; duty is not a fixed RPM.
+Only devices advertising `fan.profile` offer editing. Select radiator or case, choose a curve or manual percentage, then save/apply. Curves need 2–12 points, increasing temperature, nondecreasing duty, and an 80°C / 100% endpoint. Minimum duty is 40% radiator and 25% case. Silent fixes duty at 40% radiator / 25% case below the 80°C emergency threshold. Balanced follows filtered temperature with hysteresis and bounded duty changes. All modes retain immediate raw-temperature protection at 80°C. Pump RPM is read-only; duty is not a fixed RPM.
 
 Control is **continuous**, without a fixed duration or update limit, and continues with the UI closed. **Restore original control**, service shutdown, and safety faults attempt restoration. Check the reported result.
 
-Missing, stale, ambiguous, or invalid temperature/RPM feedback and fan faults trigger restoration. Suspend notifications and control gaps over five seconds restore before conservative restart with fresh telemetry. An unresolved durable restoration intent blocks new takeover. Hard crashes cannot guarantee restoration; long-duration and sleep/resume hardware verification of the new code remains pending. See [cooling and recovery](cooling.md).
+Missing, stale, ambiguous, or invalid temperature/RPM feedback and fan faults trigger restoration. Suspend notifications and control gaps over five seconds restore before restarting from fresh actual telemetry. An unresolved durable restoration intent blocks new takeover. Hard crashes cannot guarantee restoration; long-duration and sleep/resume hardware verification of the new code remains pending. See [cooling and recovery](cooling.md).
 
 ## Automation
 
@@ -42,7 +43,7 @@ My computer shows available hardware information and Windows policies. Choose a 
 
 - Closing the window hides it to the tray. **Exit UI** leaves continuous cooling, lighting animations, automation, and the service active.
 - **Restore & exit** attempts controller release and known pre-sync lighting restoration. Failures keep the window open. It does not stop the service or disable automation; enabled rules can apply later settings. Disable rules first if future changes should stop.
-- Update/repair with the downloaded installer and `--install`. Opening it without arguments launches an existing installation. A protected staged worker waits for its launcher to exit, stops the service, closes exact installed processes, and replaces files. Existing owner SID, enabled plugins, and preferences survive. Setup tries to reopen the app without elevation; reopen it manually if prompted.
+- Update/repair by double-clicking the downloaded installer, or using `--install`. The launcher inside the installed directory opens the existing app when run without arguments. A protected staged worker waits for its launcher to exit, stops the service, closes exact installed processes, and replaces files. Existing owner SID, enabled plugins, and preferences survive. Setup tries to reopen the app without elevation; reopen it manually if prompted.
 - Remove through Windows Installed apps or installed `LightOrder.exe --uninstall`. The elevated worker stops/deletes the service, closes installed processes, deletes program files and the uninstall entry, and removes exact LightOrder shortcuts/startup commands. The dialog offers to keep or delete ProgramData preferences, profiles, automation/backend data and the owner's local LightOrder data. Owner-local data deletion requires a resolvable Windows profile; owner-specific Run-entry cleanup requires that owner's registry hive to be loaded. Shared PawnIO and WebView2 remain installed. The staged helper is scheduled for reboot cleanup. Unresolved fan restoration intent or incomplete service deletion blocks file cleanup and retains evidence for recovery.
 
 These lifecycle descriptions reflect source behavior; package-specific clean-machine testing is still required. A stop or process exit alone does not prove hardware restoration.

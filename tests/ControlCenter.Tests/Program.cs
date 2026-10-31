@@ -12,9 +12,10 @@ async Task ExpectError(Func<Task> action, string message)
 }
 var silent = FanProfile.Silent;
 Check(silent.Evaluate(40) == (40f,25f), "independent silent low-temperature duties");
-Check(silent.Evaluate(60) == (50f,42.5f), "independent curve interpolation");
+Check(silent.Evaluate(60) == (40f,25f) && silent.Evaluate(79.9f) == (40f,25f), "silent fixed minimum below emergency");
+Check((silent with { Mode = "curve" }).Evaluate(60) == (50f,42.5f), "independent custom curve interpolation");
 var manual = silent with { Mode = "manual" };
-Check(manual.Evaluate(75) == (75f,75f) && manual.Evaluate(80) == (100f,100f), "manual high-temperature override");
+Check(manual.Evaluate(75) == (40f,25f) && manual.Evaluate(80) == (100f,100f), "manual fixed duty and independent emergency override");
 await ExpectError(() => { (manual with { CasePercent = 0 }).Validate(); return Task.CompletedTask; }, "fan-stop below calibrated range rejected");
 await ExpectError(() => { (silent with { RadiatorCurve = [new(50,50),new(40,60),new(80,100)] }).Validate(); return Task.CompletedTask; }, "unsorted fan curve rejected");
 await ExpectError(() => { (silent with { CasePercent = float.NaN }).Validate(); return Task.CompletedTask; }, "nonfinite custom duty rejected");
