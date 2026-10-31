@@ -1,4 +1,6 @@
-# Production monitor and Windows policy adapters
+# Production monitor and Windows policy adapters — historical migration record
+
+This page preserves the earlier adapter migration's implementation and test conditions. Its bounded service sessions, metadata, and test results describe that earlier revision, not current v0.2 production behavior. Current service cooling runs continuously; see [English cooling guide](en/cooling.md) / [中文散热指南](zh-CN/cooling.md) and [current verification boundaries](en/verification.md). The dated [2026-10-25 thermal acceptance record](thermal-acceptance-2026-10-25.md) remains historical evidence for its stated version and conditions; it does not validate the new continuous implementation.
 
 The two adapters implement protocol major 1: `device.discover`, `device.execute`, `telemetry.read`, and `device.release`. Discovery returns `StandardDevice[]`; its existing fields remain compatible with `DeviceInfo[]`. Commands use `{deviceId, capability, parameters}`. All identifiers below are plugin-local; the service adds `pluginId::` for public IDs.
 
@@ -10,13 +12,13 @@ The only control allowlist remains the previously validated B650M AORUS ELITE AX
 
 Unknown boards, unavailable controls, invalid baseline reports, and missing permissions expose a read-only/unavailable device instead of guessing a mapping. An unavailable monitor returns an empty telemetry array. Hardware failures during sampling clear cached values and stop the polling loop; restart the plugin to reconnect read-only. No pump control is obtained or written. On the validated board only, `pump.rpm` reads fan channel 4 based on the existing documented historical wiring and measured RPM evidence in `docs/fans.md`; that evidence does not claim visual physical-header confirmation. Other boards retain raw sensor identifiers without inferring channel roles.
 
-Sessions last **at most 30 minutes or 1,800 control updates**. Updating a profile during an active session retains the first baseline and original deadline. The controller restores at expiration; it does not renew itself. An explicit new command may start a new bounded session after verified release. This migration does not establish evidence for indefinite operation. Metadata exposes the bound, start/expiry times, status, and restoration result.
+In the earlier migration revision documented here, sessions lasted **at most 30 minutes or 1,800 control updates**. This is a historical service limit, not a current production limit. Updating a profile during an active session retains the first baseline and original deadline. The controller restores at expiration; it does not renew itself. An explicit new command may start a new bounded session after verified release. This migration does not establish evidence for indefinite operation. Metadata exposes the bound, start/expiry times, status, and restoration result.
 
 Temperature rises take effect immediately; temperature falls are limited to 2°C per control update. Startup begins conservatively from 100°C. Shared `FanProfile` enforces radiator/case floors of 40%/25%, monotonically increasing curves ending at 80°C/100%, and a separate thermal floor in manual mode. Missing/nonfinite CPU temperature or controlled-fan tachometer restores control. After eight seconds, either controlled fan below 200 RPM triggers restoration. A final deadline check precedes control writes.
 
 Normal `device.release`, EOF, and cooperative plugin shutdown restore control. Hard worker termination, power loss, OS failure, hung native I/O, and driver failure cannot guarantee restoration. Service shutdown must allow the plugin to finish its release response before forcing termination; `plugin.shutdown` acknowledgment alone precedes disposal. Do not infer successful restoration from process exit alone.
 
-## Canonical monitor metadata
+## Historical monitor metadata
 
 Device `hardware-monitor` advertises `sensor.temperature`, `sensor.fanRpm`, and `device.release`. It adds `fan.profile` only when the board/control/baseline checks permit writes and no control fault has occurred.
 
@@ -50,7 +52,7 @@ Logical device `system-info` advertises read-only `system.info`. Its metadata is
 
 The old HardwareMonitor CLI flags `--snapshot`, `--fan-session`, `--fan-test`, and `--fan-self-test` remain. The older session file/parent checks remain confined to that explicit legacy CLI. WindowsPolicy old methods and `--self-test` remain. Shared contracts and host/UI code were not changed by this adapter migration.
 
-Verification performed during this migration uses builds and hardware-free tests only:
+The following commands and test coverage describe verification reported during the earlier migration, using builds and hardware-free tests only. They are not current v0.2 results:
 
 ```text
 dotnet build plugins/HardwareMonitor/HardwareMonitor.csproj -c Release

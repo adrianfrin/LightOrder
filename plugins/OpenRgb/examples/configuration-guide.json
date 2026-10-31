@@ -1,0 +1,30 @@
+{
+  "purpose": "Administrator-installed OpenRGB backend configuration examples; these files are templates, never auto-loaded.",
+  "installation": [
+    "Production reads only backend.json beside ControlCenter.OpenRgb.dll/exe. Environment overrides and per-user configuration are ignored, including under SYSTEM.",
+    "Without backend.json the defaults retain ENE SMBus DRAM only. Copy backend.memory-only.json to backend.json only if explicit paths are needed.",
+    "For extra adapters, edit backend.explicit-opt-in.json with verified exact inventory detector names and SDK identities, remove unused entries, then have the administrator install it as backend.json.",
+    "Protect backend.json, detectors.json, the complete runtime directory (including DLLs), and dataDirectory: SYSTEM/Administrators own and can write; ordinary users may read but cannot modify, replace, or create files there. TrustedInstaller ownership is also accepted. Reparse points and untrusted replacement ancestors are rejected.",
+    "The build/installer must copy the selected backend.json explicitly into the OpenRgb plugin directory and apply protected ACLs. Do not deploy these opt-in templates as an active configuration. The plugin project does not automatically publish them."
+  ],
+  "detectorSafety": [
+    "detectors.json must be the COMPLETE detector inventory from the EXACT installed OpenRGB build. Upgrade it atomically with the complete runtime. OpenRGB may default-enable detectors missing from an old inventory; the SDK cannot validate inventory completeness.",
+    "Only ENE SMBus DRAM (when enableEneDram is true) and exact detector names referenced by additionalDevices are enabled. Unknown or case-mismatched configured detector names fail before launch.",
+    "HID safe mode stays enabled. No broad HID/SMBus scan switch or wildcard detector option is exposed. Do not opt in generic scanning detectors; authorize only the vendor/product detector needed for the known RGB peripheral.",
+    "A detector may probe more than one matching physical device. Identity rules restrict subsequent plugin writes, not what the selected upstream detector itself touches. Review the detector before installation. No claim of hardware compatibility follows from an SDK type alone.",
+    "Set enableEneDram=false for a peripheral-only backend; no PawnIO prerequisite or elevated-helper driver start is required unless a configured detector name contains SMBus. Other bus drivers needed by a selected detector must already be provisioned by the administrator."
+  ],
+  "identityAndEffects": [
+    "Each rule requires numeric OpenRGB type, exact detector and name, and nonempty location or serial. Optional vendor/description further narrow matching. Comparisons are ordinal and case-sensitive; wildcards are rejected. Omitted fields do not constrain matching; an explicit empty serial matches only an empty serial.",
+    "Types include 0 motherboard, 1 memory, 2 GPU, 3 cooler, 4 LED strip, 5 keyboard, 6 mouse, 7 mousemat, 8 headset, 9 headset stand, 10 gamepad, 11 light, 12 speaker, 14 storage, 15 case, 16 microphone, 17 accessory, 18 keypad, 19 laptop, 20 monitor. RGB hubs/controllers usually identify as LED strip or accessory: use the SDK type rather than inventing a controller type.",
+    "Generic IDs hash type/location/name/serial and survive SDK index changes. Existing ENE IDs still hash trimmed location/name. Duplicate identities or missing stable identity are displayed as ambiguous and never written.",
+    "Only a Direct or Static mode with per-LED color support and nonzero LEDs advertises static/off. Other devices remain visible as unsupported with empty capabilities/effects. Off sets all LEDs black; no persistent save or unknown native effect is invoked.",
+    "The adapter re-discovers and checks identity before each write. SDK v3 has no atomic identity-and-write primitive; hotplug can still race the final check. Cache readback is software evidence, never physical acknowledgement."
+  ],
+  "startupAndShutdown": [
+    "A listening SDK can precede device detection. Standard discovery briefly polls empty allowed inventories, then returns retryable BackendDiscovering if still empty. The service should retry read-only discovery; it must not replay writes. The SDK cannot distinguish completed zero-device detection from ongoing detection.",
+    "Normal plugin disposal waits for its serialized RPC to end and SDK connections to close, gives pending writes a bounded 250ms opportunity to drain, then requests the owned process window to close. After a bounded grace period it terminates only the retained exact owned Process object. No process-name/PID search or global kill is used for shutdown.",
+    "The bounded drain does not prove physical write acknowledgement. A connected external backend is never adopted or terminated; stop-unused still refuses a backend with possible pending writes."
+  ],
+  "validation": "Run the plugin --self-test with .NET 10. It uses pure protocol fixtures, ephemeral loopback mocks, and a fake owned-process lifetime. It does not start OpenRGB, install a driver, or write hardware."
+}

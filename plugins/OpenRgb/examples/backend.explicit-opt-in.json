@@ -1,0 +1,34 @@
+{
+  "executablePath": "C:/Program Files/LightOrder/plugins/OpenRgb/runtime/OpenRGB.exe",
+  "sourceConfigPath": "C:/Program Files/LightOrder/plugins/OpenRgb/detectors.json",
+  "dataDirectory": "C:/ProgramData/LightOrder/OpenRgb",
+  "requestTimeoutMs": 5000,
+  "enableEneDram": true,
+  "additionalDevices": [
+    {
+      "type": 2,
+      "detector": "REPLACE WITH EXACT INSTALLED GPU DETECTOR",
+      "name": "REPLACE WITH EXACT SDK GPU NAME",
+      "location": "REPLACE WITH EXACT SDK PCI LOCATION",
+      "serial": "REPLACE WITH EXACT SDK SERIAL OR REMOVE THIS FIELD IF EMPTY"
+    },
+    {
+      "type": 5,
+      "detector": "REPLACE WITH EXACT INSTALLED KEYBOARD DETECTOR",
+      "name": "REPLACE WITH EXACT SDK KEYBOARD NAME",
+      "location": "REPLACE WITH EXACT SDK HID LOCATION"
+    },
+    {
+      "type": 6,
+      "detector": "REPLACE WITH EXACT INSTALLED MOUSE DETECTOR",
+      "name": "REPLACE WITH EXACT SDK MOUSE NAME",
+      "serial": "REPLACE WITH EXACT SDK MOUSE SERIAL"
+    },
+    {
+      "type": 10,
+      "detector": "REPLACE WITH EXACT INSTALLED GAMEPAD DETECTOR",
+      "name": "REPLACE WITH EXACT SDK GAMEPAD NAME",
+      "location": "REPLACE WITH EXACT SDK GAMEPAD LOCATION"
+    }
+  ]
+}

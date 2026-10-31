@@ -18,6 +18,8 @@ jobs:
         run: dotnet build src/LightOrder.App/LightOrder.App.csproj -c Release
       - name: Service tests (no hardware)
         run: dotnet run --project tests/LightOrder.Service.Tests/LightOrder.Service.Tests.csproj -c Release
+      - name: Automation tests (no hardware)
+        run: dotnet run --project tests/LightOrder.Automation.Tests/LightOrder.Automation.Tests.csproj -c Release
       - name: Interface tests
         run: node src/LightOrder.App/verify-ui.cjs
       - name: Plugin tests (no hardware)
@@ -33,3 +35,5 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build setup
         run: dotnet build src/LightOrder.Setup/LightOrder.Setup.csproj -c Release
+      - name: Setup lifecycle tests (no installation)
+        run: dotnet run --project src/LightOrder.Setup/LightOrder.Setup.csproj -c Release -- --self-test

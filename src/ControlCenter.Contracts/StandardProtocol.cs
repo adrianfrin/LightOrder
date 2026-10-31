@@ -23,4 +23,6 @@ public static class StandardMethods
     public const string Plugins = "app.plugins";
     public const string ProfilesRead = "profiles.read";
     public const string ProfilesWrite = "profiles.write";
+    public const string AutomationRead = "app.automation.read";
+    public const string AutomationWrite = "app.automation.write";
 }

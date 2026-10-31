@@ -1,17 +1,31 @@
-# v0.1.0-preview verification
+# Verification scope
 
-This is a preview release, not an assertion that all hardware or long-term cooling scenarios are supported.
+[简体中文](../zh-CN/verification.md) · [Home](../../README.md) · [Release checks](build-and-release.md) · [Hardware evidence](hardware-support.md)
 
-Verified on Windows 11 x64 with B650M AORUS ELITE AX ICE, Ryzen 7 9700X, two ENE RGB DIMMs:
+The new 0.2 implementation adds service breathing/rainbow, durable schedule/process automation, continuous cooling safeguards, explicit OpenRGB device policies, startup restoration opt-ins, and full uninstall with optional preference retention. Source behavior is documented; it is not a claim that the final package has passed every test.
 
-- Installed protected Windows service and ordinary-user App connection. Service discovered six device/function entries through the standard protocol.
-- Motherboard and both RAM devices accepted static lighting commands; RAM cache matched. Prior user observation confirmed actual color/brightness changes.
-- Standard service fan profile ran with live readings, then released with baseline register verification true. Pump remained read-only.
-- Disposable process priority and affinity were applied, independently read back and restored; no remaining policy changes.
-- Profile persistence through the protected service, actual native WebView2 screenshots, Chinese/English UI and hardware-free interface tests.
-- Earlier bounded cooling run: 11 minutes, 643 control samples, CPU peak61.5°C, original five registers restored. This predates the service migration and does not replace the service-specific test above.
-- Service49 checks, monitor21 fake-backend assertions, fan281 policy assertions, Windows policy9 scenarios, OpenRGB and motherboard protocol selftests pass.
+## Current code and tests
 
-Installation integration caught and fixed ZIP directory separator handling and UTF8-BOM manifests. The final installer checks a successful service snapshot before claiming ready. Final exact installer hash is in Release assets.
+On 2026-10-31, the Windows 11 development system passed OpenRGB/motherboard self-tests, automation tests (99 assertions before the final dispatch regression), continuous-monitor tests (92 assertions), Windows policy tests (9 scenarios), setup lifecycle tests (42 checks), and UI checks. Service regression tests also cover ordinary snapshots updating fan session state without rescanning lighting or process inventories. See [commands and release checks](build-and-release.md). Final release results and exact hashes belong in the release record.
 
-Not verified: clean OS VM installation, full uninstall cleanup (files retained by design), 30-minute expiry on real hardware, multi-hour workloads, sleep/resume, forced worker termination, OS crashes, all third-party devices. Dynamic breathing/rainbow and scheduled/application-triggered automation are not implemented. Installer is unsigned.
+The 0.2 installer upgraded the existing installation successfully. An ordinary-user client discovered six entries, including both ENE DIMMs. Breathing and rainbow each stayed active for five seconds across three lighting endpoints, followed by saved-setting restoration; this is software/transport evidence, not physical observation. An owner-scoped disposable process trigger completed with independent priority/affinity readback and restoration. A 30-second continuous fan smoke completed with 32 updates and verified baseline-register restoration; the pump remained read-only. Native captures of six pages connected to the real service are included in the README.
+
+Remaining evidence: clean-machine installation, full uninstall with both preference choices, shared-dependency/external-process preservation, physical breathing/rainbow, additional OpenRGB models, multi-hour thermal workloads, real suspend/resume, gap recovery, and injected hardware failures. Hard process termination, OS/driver failure, blocked I/O, and power loss cannot guarantee fan restoration.
+
+## Historical v0.1.0-preview record
+
+The previous verification document recorded the following on Windows 11 x64, B650M AORUS ELITE AX ICE, Ryzen 7 9700X, and two ENE RGB DIMMs. These observations were not repeated by this documentation change:
+
+- Protected service installation and ordinary-user App connection; six device/function entries through the standard protocol.
+- Motherboard and both DIMMs accepted static commands; RAM cache matched. Earlier user observation confirmed physical color/brightness changes.
+- A service fan profile had live readings and baseline-register verification on release; pump stayed read-only.
+- A disposable process had priority/affinity applied, independently read back, and restored.
+- Protected profile persistence, native WebView2 screenshots, Chinese/English UI, and hardware-free interface checks.
+- An earlier pre-service bounded run: 11 minutes, 643 samples, CPU peak 61.5°C, five registers restored. It is not continuous-control evidence.
+- Historical reported counts: service 49 checks, monitor 21 fake assertions, fan policy 281 assertions, Windows policy 9 scenarios, plus OpenRGB/motherboard self-tests. These are not current suite counts or results.
+
+Historical install integration fixed ZIP separators and BOM manifests. Current setup includes readiness checks and further lifecycle changes; it needs new package verification. Previous preview limitations around retained program files and unimplemented animations describe that version, not current behavior. Historical screenshots are not evidence for new pages/effects.
+
+## Reporting a release
+
+Publish only observed results, with exact installer/source hash, Windows/hardware/driver versions, commands, and failures. Distinguish build success, fake tests, live IPC, installation, register/cache readback, and physical observation. `accepted` and OpenRGB cache match do not prove light output. A shutdown ACK or deleted process does not prove restoration. Installer signing status must be stated for the actual asset `LightOrder-win-x64.exe`; do not infer signing from build success.

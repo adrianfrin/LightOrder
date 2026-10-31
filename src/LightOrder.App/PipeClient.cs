@@ -50,7 +50,7 @@ internal sealed class PipeClient
         }
         catch (Exception e) when (e is IOException or TimeoutException or OperationCanceledException)
         {
-            if (sent && method is StandardMethods.Apply or StandardMethods.ProfilesWrite)
+            if (sent && method is StandardMethods.Apply or StandardMethods.ProfilesWrite or StandardMethods.AutomationWrite)
                 throw new IOException("操作结果未知，请重新读取状态后再决定；不会自动重试。 / Outcome unknown; refresh before retrying.", e);
             throw new IOException("无法连接本地服务。请完成首次配置，或检查服务后重试。 / Service unavailable. Complete setup or retry.", e);
         }

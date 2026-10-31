@@ -10,6 +10,8 @@ sealed class ControllerLease : IDisposable
         try
         {
             if (!semaphore.WaitOne(0)) throw new InvalidOperationException("Another fan controller owns the validated channels.");
+            try { RestorationIntent.RefuseUnresolved(); }
+            catch { semaphore.Release(); throw; }
         }
         catch { semaphore.Dispose(); throw; }
     }

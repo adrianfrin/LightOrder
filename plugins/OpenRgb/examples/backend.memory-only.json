@@ -1,0 +1,8 @@
+{
+  "executablePath": "C:/Program Files/LightOrder/plugins/OpenRgb/runtime/OpenRGB.exe",
+  "sourceConfigPath": "C:/Program Files/LightOrder/plugins/OpenRgb/detectors.json",
+  "dataDirectory": "C:/ProgramData/LightOrder/OpenRgb",
+  "requestTimeoutMs": 5000,
+  "enableEneDram": true,
+  "additionalDevices": []
+}

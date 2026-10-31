@@ -55,6 +55,9 @@ public sealed class ServiceWorker(ServiceSettings settings, ILogger<ServiceWorke
         {
             pipe = ServiceSecurity.CreatePipe(ServiceSecurity.ValidateOwnerSid(settings.OwnerSid));
             await runtime.StartAsync(settings, stoppingToken);
+            runtime.ConfigureAutomation(new AutomationEngine(new AutomationFileStore(ServiceSettings.StateDirectory),
+                runtime.ExecuteAutomatedAsync, runtime.ValidateCommand, new WindowsAutomationProcessSource(settings.OwnerSid)));
+            runtime.StartControlLoop(stoppingToken);
             logger.LogInformation("LightOrder service ready on {Pipe}. Protocol major {Version}.", ServiceSecurity.PipeName, Wire.Version);
             while (!stoppingToken.IsCancellationRequested)
             {
